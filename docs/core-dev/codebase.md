@@ -8,7 +8,7 @@ This document is a high-level map of the codebase for contributors.
 - The UI is a React app running in the renderer process.
 - Tool modules are auto-discovered via `import.meta.glob` and rendered inside a shared layout.
 - IPC is centralized: renderer → preload → main process.
-- Repo workflows (dev/build/package/check/marketplace) are exposed via `cli.sh`: see [cli.md](./cli.md).
+- Repo workflows (dev/build/package/check/marketplace) are exposed via `cli.sh`: see [cli.md](../shared/cli.md).
 
 ## Repository Structure
 
@@ -57,7 +57,7 @@ pnpm test
 
 See also:
 
-- [dev-guide.md](./dev-guide.md)
+- [dev-guide.md](./guide.md)
 - [module-api.md](./module-api.md)
 - [ipc-api.md](./ipc-api.md)
 - [ui-guidelines.md](./ui-guidelines.md)

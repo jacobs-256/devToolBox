@@ -38,12 +38,12 @@ pnpm build
 
 References:
 
-- [dev-guide.md](./dev-guide.md)
-- [module-api.md](./module-api.md)
-- [ui-guidelines.md](./ui-guidelines.md)
-- [ipc-api.md](./ipc-api.md)
-- [codebase.md](./codebase.md)
-- Marketplace plugin SDK: [plugin-sdk.md](./plugin-sdk.md)
+- [dev-guide.md](../core-dev/guide.md)
+- [module-api.md](../core-dev/module-api.md)
+- [ui-guidelines.md](../core-dev/ui-guidelines.md)
+- [ipc-api.md](../core-dev/ipc-api.md)
+- [codebase.md](../core-dev/codebase.md)
+- Marketplace plugin SDK: [plugin-sdk.md](../plugin-dev/sdk.md)
 
 You can also generate a starter template:
 
