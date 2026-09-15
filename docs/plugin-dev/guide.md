@@ -100,6 +100,7 @@ Common permissions:
 - `storage:kv`: namespaced key-value storage
 - `http:proxy`: host HTTP proxy (recommended to avoid CORS issues)
 - `net:socket`: host socket API for TCP/UDP-style tools
+- `net:ssh`: host SSH shell and SFTP capability
 
 ## SDK Request/Response Model
 

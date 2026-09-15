@@ -32,6 +32,15 @@ For TCP/UDP-style tools, plugins must use the host-provided socket capability (p
 - SDK methods: call `sdk.socket.*` and subscribe to `domain: 'socket'` events
 - Contract details: see `docs/plugin-dev/sdk.md`
 
+## Remote Development Tools (SSH / SFTP)
+
+For SSH terminals and SFTP file browsers, use the host-managed SSH capability.
+
+- Manifest permissions: include `net:ssh`
+- Use the `sdk.ssh.*` methods and subscribe to `domain: 'ssh'` events
+- The host supports password, OpenSSH private key, SSH agent, and keyboard-interactive authentication
+- Contract details: see `docs/plugin-dev/sdk.md`
+
 ## Local Install via Registry
 
 DevToolBox installs marketplace plugins via a `registry.json`. For local development, you can generate a local zip and a `file://` registry:

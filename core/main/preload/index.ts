@@ -109,7 +109,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     keySize: number;
     validityDays: number;
   }) => ipcRenderer.invoke('crypto:generateCA', params),
-  generateRSAKeyPair: (params: { keySize: number }) => ipcRenderer.invoke('crypto:generateRSAKeyPair', params),
+  generateRSAKeyPair: (params: { keySize: number }) =>
+    ipcRenderer.invoke('crypto:generateRSAKeyPair', params),
   generateClientCert: (params: {
     caCertPem: string;
     caKeyPem: string;
@@ -185,11 +186,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('marketplace:fetchRegistry', url, options),
 
   // Plugin SDK
-  pluginHttpRequest: (pluginId: string, params: unknown) => ipcRenderer.invoke('plugin:httpRequest', pluginId, params),
+  pluginHttpRequest: (pluginId: string, params: unknown) =>
+    ipcRenderer.invoke('plugin:httpRequest', pluginId, params),
   pluginStorageGet: (pluginId: string, key: string) => ipcRenderer.invoke('plugin:storageGet', pluginId, key),
   pluginStorageSet: (pluginId: string, key: string, value: unknown) =>
     ipcRenderer.invoke('plugin:storageSet', pluginId, key, value),
-  pluginStorageDelete: (pluginId: string, key: string) => ipcRenderer.invoke('plugin:storageDelete', pluginId, key),
+  pluginStorageDelete: (pluginId: string, key: string) =>
+    ipcRenderer.invoke('plugin:storageDelete', pluginId, key),
   pluginStorageList: (pluginId: string, prefix?: string) =>
     ipcRenderer.invoke('plugin:storageList', pluginId, prefix),
   pluginStorageClear: (pluginId: string) => ipcRenderer.invoke('plugin:storageClear', pluginId),
@@ -207,9 +210,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('plugin:systemRevealPath', pluginId, pathToken),
   pluginSystemOpenPath: (pluginId: string, pathToken: string) =>
     ipcRenderer.invoke('plugin:systemOpenPath', pluginId, pathToken),
-  pluginSystemNotify: (pluginId: string, params: unknown) => ipcRenderer.invoke('plugin:systemNotify', pluginId, params),
+  pluginSystemNotify: (pluginId: string, params: unknown) =>
+    ipcRenderer.invoke('plugin:systemNotify', pluginId, params),
   pluginSystemGetInfo: (pluginId: string) => ipcRenderer.invoke('plugin:systemGetInfo', pluginId),
-  pluginSystemGetEnv: (pluginId: string, keys: string[]) => ipcRenderer.invoke('plugin:systemGetEnv', pluginId, keys),
+  pluginSystemGetEnv: (pluginId: string, keys: string[]) =>
+    ipcRenderer.invoke('plugin:systemGetEnv', pluginId, keys),
   pluginLog: (pluginId: string, params: unknown) => ipcRenderer.invoke('plugin:log', pluginId, params),
   pluginSocketServerStart: (pluginId: string, params: unknown) =>
     ipcRenderer.invoke('plugin:socketServerStart', pluginId, params),
@@ -221,7 +226,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('plugin:socketServerKick', pluginId, params),
   pluginSocketClientConnect: (pluginId: string, params: unknown) =>
     ipcRenderer.invoke('plugin:socketClientConnect', pluginId, params),
-  pluginSocketClientDisconnect: (pluginId: string) => ipcRenderer.invoke('plugin:socketClientDisconnect', pluginId),
+  pluginSocketClientDisconnect: (pluginId: string) =>
+    ipcRenderer.invoke('plugin:socketClientDisconnect', pluginId),
   pluginSocketClientStatus: (pluginId: string) => ipcRenderer.invoke('plugin:socketClientStatus', pluginId),
   pluginSocketClientSend: (pluginId: string, params: unknown) =>
     ipcRenderer.invoke('plugin:socketClientSend', pluginId, params),
@@ -233,10 +239,46 @@ contextBridge.exposeInMainWorld('electronAPI', {
   offPluginSocketEvent: (handler: unknown) => {
     if (typeof handler === 'function') ipcRenderer.removeListener('plugin:socketEvent', handler as Listener);
   },
+  pluginSshConnect: (pluginId: string, params: unknown) =>
+    ipcRenderer.invoke('plugin:sshConnect', pluginId, params),
+  pluginSshDisconnect: (pluginId: string, params: unknown) =>
+    ipcRenderer.invoke('plugin:sshDisconnect', pluginId, params),
+  pluginSshCloseTerminal: (pluginId: string, params: unknown) =>
+    ipcRenderer.invoke('plugin:sshCloseTerminal', pluginId, params),
+  pluginSshListSessions: (pluginId: string) => ipcRenderer.invoke('plugin:sshListSessions', pluginId),
+  pluginSshWrite: (pluginId: string, params: unknown) =>
+    ipcRenderer.invoke('plugin:sshWrite', pluginId, params),
+  pluginSshResize: (pluginId: string, params: unknown) =>
+    ipcRenderer.invoke('plugin:sshResize', pluginId, params),
+  pluginSshRespondKeyboard: (pluginId: string, params: unknown) =>
+    ipcRenderer.invoke('plugin:sshRespondKeyboard', pluginId, params),
+  pluginSshSftpRealpath: (pluginId: string, params: unknown) =>
+    ipcRenderer.invoke('plugin:sshSftpRealpath', pluginId, params),
+  pluginSshSftpList: (pluginId: string, params: unknown) =>
+    ipcRenderer.invoke('plugin:sshSftpList', pluginId, params),
+  pluginSshSftpReadFile: (pluginId: string, params: unknown) =>
+    ipcRenderer.invoke('plugin:sshSftpReadFile', pluginId, params),
+  pluginSshSftpWriteFile: (pluginId: string, params: unknown) =>
+    ipcRenderer.invoke('plugin:sshSftpWriteFile', pluginId, params),
+  pluginSshSftpMkdir: (pluginId: string, params: unknown) =>
+    ipcRenderer.invoke('plugin:sshSftpMkdir', pluginId, params),
+  pluginSshSftpDelete: (pluginId: string, params: unknown) =>
+    ipcRenderer.invoke('plugin:sshSftpDelete', pluginId, params),
+  pluginSshSftpRename: (pluginId: string, params: unknown) =>
+    ipcRenderer.invoke('plugin:sshSftpRename', pluginId, params),
+  onPluginSshEvent: (cb: (pluginId: string, ev: unknown) => void) => {
+    const handler = (_e: IpcRendererEvent, pid: string, ev: unknown) => cb(pid, ev);
+    ipcRenderer.on('plugin:sshEvent', handler);
+    return handler;
+  },
+  offPluginSshEvent: (handler: unknown) => {
+    if (typeof handler === 'function') ipcRenderer.removeListener('plugin:sshEvent', handler as Listener);
+  },
   httpRequest: (params: unknown) => ipcRenderer.invoke('http:request', params),
   mqttConnect: (params: unknown) => ipcRenderer.invoke('mqtt:connect', params),
   mqttDisconnect: (id: string) => ipcRenderer.invoke('mqtt:disconnect', id),
-  mqttSubscribe: (id: string, topic: string, qos: number) => ipcRenderer.invoke('mqtt:subscribe', id, topic, qos),
+  mqttSubscribe: (id: string, topic: string, qos: number) =>
+    ipcRenderer.invoke('mqtt:subscribe', id, topic, qos),
   mqttUnsubscribe: (id: string, topic: string) => ipcRenderer.invoke('mqtt:unsubscribe', id, topic),
   mqttPublish: (id: string, topic: string, payload: string, qos: number, retain: boolean) =>
     ipcRenderer.invoke('mqtt:publish', id, topic, payload, qos, retain),

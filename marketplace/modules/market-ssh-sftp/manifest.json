@@ -1,0 +1,25 @@
+{
+  "id": "market-ssh-sftp",
+  "name": "SSH / SFTP",
+  "description": "Manage SSH connections, interactive terminals, and SFTP files in one workspace",
+  "i18n": {
+    "en": {
+      "name": "SSH / SFTP",
+      "description": "Manage SSH connections, interactive terminals, and SFTP files in one workspace"
+    },
+    "zh-CN": {
+      "name": "SSH / SFTP",
+      "description": "管理 SSH 连接、交互式终端与 SFTP 文件"
+    }
+  },
+  "version": "0.1.0",
+  "sdkVersion": "1.0",
+  "entry": "package/index.html",
+  "categoryId": "dev-tools",
+  "author": "DevToolBox",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/XthingsJacobs/devToolBox",
+  "repository": "https://github.com/XthingsJacobs/devToolBox",
+  "iconKey": "vsc:VscTerminal",
+  "permissions": ["storage:kv", "net:ssh"]
+}

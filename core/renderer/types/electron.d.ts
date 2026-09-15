@@ -98,7 +98,9 @@ export interface ElectronAPI {
     keySize: number;
     validityDays: number;
   }) => Promise<{ success: boolean; privateKey?: string; certificate?: string; error?: string }>;
-  generateRSAKeyPair: (params: { keySize: number }) => Promise<{ success: boolean; publicKey?: string; privateKey?: string; error?: string }>;
+  generateRSAKeyPair: (params: {
+    keySize: number;
+  }) => Promise<{ success: boolean; publicKey?: string; privateKey?: string; error?: string }>;
   generateClientCert: (params: {
     caCertPem: string;
     caKeyPem: string;
@@ -164,7 +166,11 @@ export interface ElectronAPI {
   // Plugin SDK (host-implemented)
   pluginHttpRequest: (pluginId: string, params: any) => Promise<{ ok: boolean; data?: any; error?: any }>;
   pluginStorageGet: (pluginId: string, key: string) => Promise<{ ok: boolean; data?: any; error?: any }>;
-  pluginStorageSet: (pluginId: string, key: string, value: any) => Promise<{ ok: boolean; data?: any; error?: any }>;
+  pluginStorageSet: (
+    pluginId: string,
+    key: string,
+    value: any,
+  ) => Promise<{ ok: boolean; data?: any; error?: any }>;
   pluginStorageDelete: (pluginId: string, key: string) => Promise<{ ok: boolean; data?: any; error?: any }>;
   pluginStorageList: (pluginId: string, prefix?: string) => Promise<{ ok: boolean; data?: any; error?: any }>;
   pluginStorageClear: (pluginId: string) => Promise<{ ok: boolean; data?: any; error?: any }>;
@@ -176,31 +182,84 @@ export interface ElectronAPI {
     pluginId: string,
     params: any,
   ) => Promise<{ ok: boolean; data?: any; error?: any }>;
-  pluginFsReadFile: (pluginId: string, fileToken: string, encoding?: string) => Promise<{ ok: boolean; data?: any; error?: any }>;
+  pluginFsReadFile: (
+    pluginId: string,
+    fileToken: string,
+    encoding?: string,
+  ) => Promise<{ ok: boolean; data?: any; error?: any }>;
   pluginFsWriteFile: (
     pluginId: string,
     fileToken: string,
     content: string,
     encoding?: string,
   ) => Promise<{ ok: boolean; data?: any; error?: any }>;
-  pluginSystemOpenExternal: (pluginId: string, url: string) => Promise<{ ok: boolean; data?: any; error?: any }>;
-  pluginSystemRevealPath: (pluginId: string, pathToken: string) => Promise<{ ok: boolean; data?: any; error?: any }>;
-  pluginSystemOpenPath: (pluginId: string, pathToken: string) => Promise<{ ok: boolean; data?: any; error?: any }>;
+  pluginSystemOpenExternal: (
+    pluginId: string,
+    url: string,
+  ) => Promise<{ ok: boolean; data?: any; error?: any }>;
+  pluginSystemRevealPath: (
+    pluginId: string,
+    pathToken: string,
+  ) => Promise<{ ok: boolean; data?: any; error?: any }>;
+  pluginSystemOpenPath: (
+    pluginId: string,
+    pathToken: string,
+  ) => Promise<{ ok: boolean; data?: any; error?: any }>;
   pluginSystemNotify: (pluginId: string, params: any) => Promise<{ ok: boolean; data?: any; error?: any }>;
   pluginSystemGetInfo: (pluginId: string) => Promise<{ ok: boolean; data?: any; error?: any }>;
   pluginSystemGetEnv: (pluginId: string, keys: string[]) => Promise<{ ok: boolean; data?: any; error?: any }>;
   pluginLog: (pluginId: string, params: any) => Promise<{ ok: boolean; data?: any; error?: any }>;
-  pluginSocketServerStart: (pluginId: string, params: any) => Promise<{ ok: boolean; data?: any; error?: any }>;
+  pluginSocketServerStart: (
+    pluginId: string,
+    params: any,
+  ) => Promise<{ ok: boolean; data?: any; error?: any }>;
   pluginSocketServerStop: (pluginId: string) => Promise<{ ok: boolean; data?: any; error?: any }>;
   pluginSocketServerStatus: (pluginId: string) => Promise<{ ok: boolean; data?: any; error?: any }>;
-  pluginSocketServerSend: (pluginId: string, params: any) => Promise<{ ok: boolean; data?: any; error?: any }>;
-  pluginSocketServerKick: (pluginId: string, params: any) => Promise<{ ok: boolean; data?: any; error?: any }>;
-  pluginSocketClientConnect: (pluginId: string, params: any) => Promise<{ ok: boolean; data?: any; error?: any }>;
+  pluginSocketServerSend: (
+    pluginId: string,
+    params: any,
+  ) => Promise<{ ok: boolean; data?: any; error?: any }>;
+  pluginSocketServerKick: (
+    pluginId: string,
+    params: any,
+  ) => Promise<{ ok: boolean; data?: any; error?: any }>;
+  pluginSocketClientConnect: (
+    pluginId: string,
+    params: any,
+  ) => Promise<{ ok: boolean; data?: any; error?: any }>;
   pluginSocketClientDisconnect: (pluginId: string) => Promise<{ ok: boolean; data?: any; error?: any }>;
   pluginSocketClientStatus: (pluginId: string) => Promise<{ ok: boolean; data?: any; error?: any }>;
-  pluginSocketClientSend: (pluginId: string, params: any) => Promise<{ ok: boolean; data?: any; error?: any }>;
+  pluginSocketClientSend: (
+    pluginId: string,
+    params: any,
+  ) => Promise<{ ok: boolean; data?: any; error?: any }>;
   onPluginSocketEvent: (cb: (pluginId: string, ev: any) => void) => any;
   offPluginSocketEvent: (handler: any) => void;
+  pluginSshConnect: (pluginId: string, params: any) => Promise<{ ok: boolean; data?: any; error?: any }>;
+  pluginSshDisconnect: (pluginId: string, params: any) => Promise<{ ok: boolean; data?: any; error?: any }>;
+  pluginSshCloseTerminal: (
+    pluginId: string,
+    params: any,
+  ) => Promise<{ ok: boolean; data?: any; error?: any }>;
+  pluginSshListSessions: (pluginId: string) => Promise<{ ok: boolean; data?: any; error?: any }>;
+  pluginSshWrite: (pluginId: string, params: any) => Promise<{ ok: boolean; data?: any; error?: any }>;
+  pluginSshResize: (pluginId: string, params: any) => Promise<{ ok: boolean; data?: any; error?: any }>;
+  pluginSshRespondKeyboard: (
+    pluginId: string,
+    params: any,
+  ) => Promise<{ ok: boolean; data?: any; error?: any }>;
+  pluginSshSftpRealpath: (pluginId: string, params: any) => Promise<{ ok: boolean; data?: any; error?: any }>;
+  pluginSshSftpList: (pluginId: string, params: any) => Promise<{ ok: boolean; data?: any; error?: any }>;
+  pluginSshSftpReadFile: (pluginId: string, params: any) => Promise<{ ok: boolean; data?: any; error?: any }>;
+  pluginSshSftpWriteFile: (
+    pluginId: string,
+    params: any,
+  ) => Promise<{ ok: boolean; data?: any; error?: any }>;
+  pluginSshSftpMkdir: (pluginId: string, params: any) => Promise<{ ok: boolean; data?: any; error?: any }>;
+  pluginSshSftpDelete: (pluginId: string, params: any) => Promise<{ ok: boolean; data?: any; error?: any }>;
+  pluginSshSftpRename: (pluginId: string, params: any) => Promise<{ ok: boolean; data?: any; error?: any }>;
+  onPluginSshEvent: (cb: (pluginId: string, ev: any) => void) => any;
+  offPluginSshEvent: (handler: any) => void;
   httpRequest: (params: {
     url: string;
     method?: string;
@@ -212,7 +271,11 @@ export interface ElectronAPI {
   }) => Promise<{ ok: boolean; data?: any; error?: any }>;
   mqttConnect: (params: any) => Promise<{ ok: boolean; data?: any; error?: any }>;
   mqttDisconnect: (id: string) => Promise<{ ok: boolean; data?: any; error?: any }>;
-  mqttSubscribe: (id: string, topic: string, qos: number) => Promise<{ ok: boolean; data?: any; error?: any }>;
+  mqttSubscribe: (
+    id: string,
+    topic: string,
+    qos: number,
+  ) => Promise<{ ok: boolean; data?: any; error?: any }>;
   mqttUnsubscribe: (id: string, topic: string) => Promise<{ ok: boolean; data?: any; error?: any }>;
   mqttPublish: (
     id: string,

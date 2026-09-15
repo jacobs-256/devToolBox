@@ -132,7 +132,7 @@ export default defineConfig({
           build: {
             outDir: path.resolve(__dirname, 'dist-electron/main'),
             rollupOptions: {
-              external: ['mqtt', 'ws', 'bufferutil', 'utf-8-validate'],
+              external: ['mqtt', 'ws', 'ssh2', 'bufferutil', 'utf-8-validate'],
             },
           },
         },

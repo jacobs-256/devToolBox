@@ -1,4 +1,13 @@
-import { app, ipcMain, dialog, shell, Notification, BrowserWindow, type FileFilter, type OpenDialogOptions } from 'electron';
+import {
+  app,
+  ipcMain,
+  dialog,
+  shell,
+  Notification,
+  BrowserWindow,
+  type FileFilter,
+  type OpenDialogOptions,
+} from 'electron';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -7,6 +16,7 @@ import net from 'net';
 import dgram from 'dgram';
 import { fileURLToPath, pathToFileURL } from 'url';
 import extract from 'extract-zip';
+import { Client, type ClientChannel, type ConnectConfig, type Prompt, type SFTPWrapper } from 'ssh2';
 
 type PluginPermission =
   | 'http:external'
@@ -16,6 +26,7 @@ type PluginPermission =
   | 'fs:write'
   | 'storage:kv'
   | 'net:socket'
+  | 'net:ssh'
   | 'bluetooth'
   | 'serial'
   | 'usb'
@@ -36,6 +47,8 @@ interface MarketplacePluginManifest {
   entry: string;
   categoryId: string;
   author: string;
+  icon?: string;
+  iconKey?: string;
   license: string;
   homepage: string;
   repository: string;
@@ -66,7 +79,9 @@ interface MarketplaceState {
 }
 
 function isDebugEnabled(): boolean {
-  const v = String(process.env.DEVTOOLBOX_DEBUG ?? '').trim().toLowerCase();
+  const v = String(process.env.DEVTOOLBOX_DEBUG ?? '')
+    .trim()
+    .toLowerCase();
   return v === '1' || v === 'true' || v === 'yes' || v === 'on';
 }
 
@@ -101,7 +116,9 @@ function validateHttpDomain(domain: string): boolean {
   return /^[a-z0-9.*-]+$/.test(domain.toLowerCase());
 }
 
-function validateManifest(manifest: unknown): { ok: true; data: MarketplacePluginManifest } | { ok: false; error: string } {
+function validateManifest(
+  manifest: unknown,
+): { ok: true; data: MarketplacePluginManifest } | { ok: false; error: string } {
   if (!isRecord(manifest)) return { ok: false, error: 'manifest is not an object' };
   const id = manifest.id;
   const name = manifest.name;
@@ -124,12 +141,16 @@ function validateManifest(manifest: unknown): { ok: true; data: MarketplacePlugi
   const entry = manifest.entry;
   const categoryId = manifest.categoryId;
   const author = manifest.author;
+  const icon = typeof manifest.icon === 'string' && manifest.icon.trim() ? manifest.icon.trim() : undefined;
+  const iconKey =
+    typeof manifest.iconKey === 'string' && manifest.iconKey.trim() ? manifest.iconKey.trim() : undefined;
   const license = manifest.license;
   const homepage = manifest.homepage;
   const repository = manifest.repository;
   const permissions = normalizeStringArray(manifest.permissions) as PluginPermission[];
 
-  if (typeof id !== 'string' || !isKebabCaseId(id) || !id.startsWith('market-')) return { ok: false, error: 'invalid id' };
+  if (typeof id !== 'string' || !isKebabCaseId(id) || !id.startsWith('market-'))
+    return { ok: false, error: 'invalid id' };
   if (typeof name !== 'string' || !name.trim()) return { ok: false, error: 'invalid name' };
   if (typeof description !== 'string') return { ok: false, error: 'invalid description' };
   if (typeof version !== 'string' || !version.trim()) return { ok: false, error: 'invalid version' };
@@ -146,7 +167,8 @@ function validateManifest(manifest: unknown): { ok: true; data: MarketplacePlugi
   if (permissions.includes('http:external' as PluginPermission) && httpDomains.length === 0) {
     return { ok: false, error: 'httpDomains is required when http:external is present' };
   }
-  if (httpDomains.length && httpDomains.some((d) => !validateHttpDomain(d))) return { ok: false, error: 'invalid httpDomains' };
+  if (httpDomains.length && httpDomains.some((d) => !validateHttpDomain(d)))
+    return { ok: false, error: 'invalid httpDomains' };
 
   const envAllowlist = normalizeStringArray(manifest.envAllowlist);
   if (permissions.includes('system:env:read' as PluginPermission) && envAllowlist.length === 0) {
@@ -163,6 +185,8 @@ function validateManifest(manifest: unknown): { ok: true; data: MarketplacePlugi
     entry,
     categoryId,
     author,
+    icon,
+    iconKey,
     license,
     homepage,
     repository,
@@ -173,7 +197,10 @@ function validateManifest(manifest: unknown): { ok: true; data: MarketplacePlugi
   return { ok: true, data: out };
 }
 
-function compareManifests(registryManifest: MarketplacePluginManifest, packageManifest: MarketplacePluginManifest): string[] {
+function compareManifests(
+  registryManifest: MarketplacePluginManifest,
+  packageManifest: MarketplacePluginManifest,
+): string[] {
   const errors: string[] = [];
   if (registryManifest.id !== packageManifest.id) errors.push('id mismatch');
   if (registryManifest.version !== packageManifest.version) errors.push('version mismatch');
@@ -181,10 +208,13 @@ function compareManifests(registryManifest: MarketplacePluginManifest, packageMa
   if (registryManifest.entry !== packageManifest.entry) errors.push('entry mismatch');
   if (registryManifest.categoryId !== packageManifest.categoryId) errors.push('categoryId mismatch');
   if (registryManifest.author !== packageManifest.author) errors.push('author mismatch');
+  if ((registryManifest.icon ?? '') !== (packageManifest.icon ?? '')) errors.push('icon mismatch');
+  if ((registryManifest.iconKey ?? '') !== (packageManifest.iconKey ?? '')) errors.push('iconKey mismatch');
   if (registryManifest.license !== packageManifest.license) errors.push('license mismatch');
   if (registryManifest.homepage !== packageManifest.homepage) errors.push('homepage mismatch');
   if (registryManifest.repository !== packageManifest.repository) errors.push('repository mismatch');
-  if (JSON.stringify(registryManifest.i18n ?? null) !== JSON.stringify(packageManifest.i18n ?? null)) errors.push('i18n mismatch');
+  if (JSON.stringify(registryManifest.i18n ?? null) !== JSON.stringify(packageManifest.i18n ?? null))
+    errors.push('i18n mismatch');
 
   const a = normalizeStringArray(registryManifest.permissions);
   const b = normalizeStringArray(packageManifest.permissions);
@@ -273,7 +303,8 @@ function readState(): MarketplaceState {
   try {
     const raw = fs.readFileSync(getStatePath(), 'utf-8');
     const parsed = JSON.parse(raw) as MarketplaceState;
-    if (parsed && typeof parsed === 'object' && parsed.installed && typeof parsed.installed === 'object') return parsed;
+    if (parsed && typeof parsed === 'object' && parsed.installed && typeof parsed.installed === 'object')
+      return parsed;
   } catch {
     return { installed: {} };
   }
@@ -593,13 +624,828 @@ async function cleanupSocketPlugin(pluginId: string): Promise<void> {
   socketPluginStates.delete(pluginId);
 }
 
-function setToken(map: Map<string, Map<string, string>>, pluginId: string, token: string, value: string): void {
+type SshAuthMethod = 'password' | 'privateKey' | 'agent' | 'keyboard-interactive';
+type SshSessionStatus = 'connecting' | 'ready' | 'closed' | 'error';
+const MAX_SSH_OUTPUT_BUFFER = 240_000;
+
+type SshProxyConnectParams = {
+  sessionId?: string;
+  profileId?: string;
+  name?: string;
+  holdKey?: string;
+  host: string;
+  port: number;
+  username: string;
+  authMethod: SshAuthMethod;
+  password?: string;
+  privateKey?: string;
+  passphrase?: string;
+  agent?: string;
+  hostFingerprint?: string;
+};
+
+type SshShellState = {
+  terminalId: string;
+  shell: ClientChannel | null;
+  shellPromise: Promise<ClientChannel> | null;
+  closing: boolean;
+  output: string;
+};
+
+type SshSessionState = {
+  sessionId: string;
+  profileId?: string;
+  hidden: boolean;
+  hold: boolean;
+  holdKey?: string;
+  host: string;
+  port: number;
+  username: string;
+  client: Client;
+  shells: Map<string, SshShellState>;
+  clientReady: boolean;
+  closing: boolean;
+  sftp: SFTPWrapper | null;
+  sftpPromise: Promise<SFTPWrapper> | null;
+  keyboardFinish: ((answers: string[]) => void) | null;
+  status: SshSessionStatus;
+  fingerprint?: string;
+  connectedAt?: string;
+  output: string;
+  proxySessionId?: string;
+  proxyProfileId?: string;
+  proxyName?: string;
+  proxyHost?: string;
+  proxyUsername?: string;
+  proxyStream: ClientChannel | null;
+};
+
+type SshPluginState = Map<string, SshSessionState>;
+
+type SshSessionSummary = {
+  sessionId: string;
+  terminalId?: string;
+  profileId?: string;
+  hidden?: boolean;
+  hold: boolean;
+  holdKey?: string;
+  host: string;
+  port: number;
+  username: string;
+  status: SshSessionStatus;
+  fingerprint?: string;
+  connectedAt?: string;
+  output?: string;
+  proxySessionId?: string;
+  proxyProfileId?: string;
+  proxyName?: string;
+  proxyHost?: string;
+  proxyUsername?: string;
+};
+
+type SshEvent =
+  | { type: 'status'; sessionId: string; status: SshSessionSummary }
+  | { type: 'data'; sessionId: string; terminalId?: string; stream: 'stdout' | 'stderr'; data: string }
+  | {
+      type: 'log';
+      sessionId?: string;
+      terminalId?: string;
+      level: 'info' | 'warn' | 'error';
+      message: string;
+    }
+  | { type: 'hostKey'; sessionId: string; fingerprint: string; verified: boolean }
+  | {
+      type: 'keyboardInteractive';
+      sessionId: string;
+      terminalId?: string;
+      name: string;
+      instructions: string;
+      prompts: Array<{ prompt: string; echo?: boolean }>;
+    }
+  | { type: 'sftp'; sessionId: string; action: string; path?: string };
+
+const sshPluginStates = new Map<string, SshPluginState>();
+
+function getSshState(pluginId: string): SshPluginState {
+  const hit = sshPluginStates.get(pluginId);
+  if (hit) return hit;
+  const created: SshPluginState = new Map();
+  sshPluginStates.set(pluginId, created);
+  return created;
+}
+
+function sendSshEvent(pluginId: string, event: SshEvent): void {
+  BrowserWindow.getAllWindows().forEach((w) => {
+    try {
+      w.webContents.send('plugin:sshEvent', pluginId, event);
+    } catch {
+      void 0;
+    }
+  });
+}
+
+function normalizeSshFingerprint(value: string): string {
+  return value
+    .trim()
+    .replace(/^sha256:/i, '')
+    .replace(/\s+/g, '');
+}
+
+function getSshShell(session: SshSessionState, terminalId?: string): SshShellState | undefined {
+  if (terminalId) return session.shells.get(terminalId);
+  const first = session.shells.values().next();
+  return first.done ? undefined : first.value;
+}
+
+function buildSshSessionSummary(session: SshSessionState, terminalId?: string): SshSessionSummary {
+  const shell = getSshShell(session, terminalId);
+  return {
+    sessionId: session.sessionId,
+    terminalId: shell?.terminalId ?? terminalId,
+    profileId: session.profileId,
+    hidden: session.hidden || undefined,
+    hold: session.hold,
+    holdKey: session.holdKey,
+    host: session.host,
+    port: session.port,
+    username: session.username,
+    status: session.status,
+    fingerprint: session.fingerprint,
+    connectedAt: session.connectedAt,
+    output: session.hold ? (shell?.output ?? session.output) : undefined,
+    proxySessionId: session.proxySessionId,
+    proxyProfileId: session.proxyProfileId,
+    proxyName: session.proxyName,
+    proxyHost: session.proxyHost,
+    proxyUsername: session.proxyUsername,
+  };
+}
+
+function sendSshStatus(pluginId: string, session: SshSessionState, terminalId?: string): void {
+  sendSshEvent(pluginId, {
+    type: 'status',
+    sessionId: session.sessionId,
+    status: buildSshSessionSummary(session, terminalId),
+  });
+}
+
+function sshErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
+function appendSshOutput(session: SshSessionState, data: string): void {
+  if (!data) return;
+  const next = `${session.output}${data}`;
+  session.output = next.length > MAX_SSH_OUTPUT_BUFFER ? next.slice(-MAX_SSH_OUTPUT_BUFFER) : next;
+}
+
+function appendSshShellOutput(session: SshSessionState, shell: SshShellState, data: string): void {
+  if (!data) return;
+  appendSshOutput(session, data);
+  const next = `${shell.output}${data}`;
+  shell.output = next.length > MAX_SSH_OUTPUT_BUFFER ? next.slice(-MAX_SSH_OUTPUT_BUFFER) : next;
+}
+
+function getSshSession(pluginId: string, sessionId: string): SshSessionState | undefined {
+  return getSshState(pluginId).get(sessionId);
+}
+
+function sameSshEndpoint(
+  session: Pick<SshSessionState, 'host' | 'port' | 'username'>,
+  params: Pick<SshSessionState, 'host' | 'port' | 'username'>,
+): boolean {
+  return session.host === params.host && session.port === params.port && session.username === params.username;
+}
+
+function findHeldSshSession(
+  pluginId: string,
+  holdKey: string,
+  endpoint?: Pick<SshSessionState, 'host' | 'port' | 'username'>,
+): SshSessionState | undefined {
+  const candidates = Array.from(getSshState(pluginId).values()).filter(
+    (session) =>
+      session.hold &&
+      session.holdKey === holdKey &&
+      (session.status === 'connecting' || session.status === 'ready') &&
+      (!endpoint || sameSshEndpoint(session, endpoint)),
+  );
+  return candidates[0];
+}
+
+function findHeldSshSessionByKey(pluginId: string, holdKey: string): SshSessionState | undefined {
+  return Array.from(getSshState(pluginId).values()).find(
+    (session) =>
+      session.hold &&
+      session.holdKey === holdKey &&
+      (session.status === 'connecting' || session.status === 'ready'),
+  );
+}
+
+function waitForSshTransportReady(session: SshSessionState, timeoutMs = 25_000): Promise<void> {
+  if (session.clientReady && session.status === 'ready' && !session.closing) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    const startedAt = Date.now();
+    const timer = setInterval(() => {
+      if (session.clientReady && session.status === 'ready' && !session.closing) {
+        clearInterval(timer);
+        resolve();
+        return;
+      }
+      if (session.closing || session.status === 'closed' || session.status === 'error') {
+        clearInterval(timer);
+        reject(new Error('SSH proxy connection is not available'));
+        return;
+      }
+      if (Date.now() - startedAt >= timeoutMs) {
+        clearInterval(timer);
+        reject(new Error('Timed out waiting for SSH proxy connection'));
+      }
+    }, 80);
+  });
+}
+
+function closeSshProxyStream(session: SshSessionState): void {
+  try {
+    session.proxyStream?.close();
+  } catch {
+    void 0;
+  }
+  session.proxyStream = null;
+}
+
+function normalizeSshProxySessionId(proxy: SshProxyConnectParams): string {
+  const stable =
+    String(proxy.sessionId ?? '').trim() ||
+    String(proxy.profileId ? `proxy-${proxy.profileId}` : '').trim() ||
+    String(proxy.holdKey ? `proxy-${proxy.holdKey}` : '').trim();
+  return stable || `proxy-${proxy.username}-${proxy.host}-${proxy.port}`.replace(/[^a-zA-Z0-9_.:-]+/g, '-');
+}
+
+async function ensureSshProxySession(
+  pluginId: string,
+  proxy: SshProxyConnectParams,
+): Promise<SshSessionState> {
+  const holdKey = String(proxy.holdKey || proxy.profileId || normalizeSshProxySessionId(proxy)).trim();
+  const endpoint = { host: proxy.host, port: proxy.port, username: proxy.username };
+  const heldByKey = findHeldSshSessionByKey(pluginId, holdKey);
+  const held = findHeldSshSession(pluginId, holdKey, endpoint);
+  if (heldByKey && !held) {
+    throw new Error(
+      `SSH Proxy "${proxy.name || holdKey}" is already connected to ${heldByKey.username}@${heldByKey.host}:${heldByKey.port}. Stop it before changing the proxy host.`,
+    );
+  }
+  if (held) {
+    await waitForSshTransportReady(held);
+    return held;
+  }
+
+  return connectSshSession(pluginId, {
+    sessionId: normalizeSshProxySessionId(proxy),
+    terminalId: `${normalizeSshProxySessionId(proxy)}:proxy`,
+    profileId: proxy.profileId,
+    hidden: true,
+    openShell: false,
+    hold: true,
+    holdKey,
+    host: proxy.host,
+    port: proxy.port,
+    username: proxy.username,
+    authMethod: proxy.authMethod,
+    password: proxy.password,
+    privateKey: proxy.privateKey,
+    passphrase: proxy.passphrase,
+    agent: proxy.agent,
+    hostFingerprint: proxy.hostFingerprint,
+  });
+}
+
+function openSshProxyStream(
+  proxySession: SshSessionState,
+  destinationHost: string,
+  destinationPort: number,
+): Promise<ClientChannel> {
+  return new Promise<ClientChannel>((resolve, reject) => {
+    proxySession.client.forwardOut('127.0.0.1', 0, destinationHost, destinationPort, (error, stream) => {
+      if (error || !stream) {
+        reject(error ?? new Error('Unable to open SSH proxy tunnel'));
+        return;
+      }
+      resolve(stream);
+    });
+  });
+}
+
+function parseSshProxyConnectParams(value: unknown): SshProxyConnectParams | undefined {
+  if (!isRecord(value)) return undefined;
+  const host = asString(value.host).trim();
+  const username = asString(value.username).trim();
+  const port = Math.floor(Number(value.port ?? 22));
+  const authMethod = asString(value.authMethod, 'password') as SshAuthMethod;
+  if (!host || !username || !port || port < 1 || port > 65535) {
+    throw new Error('Invalid SSH proxy host, username, or port');
+  }
+  if (!['password', 'privateKey', 'agent', 'keyboard-interactive'].includes(authMethod)) {
+    throw new Error('Unsupported SSH proxy authentication method');
+  }
+  return {
+    sessionId: asString(value.sessionId).trim() || undefined,
+    profileId: asString(value.profileId).trim() || undefined,
+    name: asString(value.name).trim() || undefined,
+    holdKey: asString(value.holdKey, asString(value.profileId)).trim() || undefined,
+    host,
+    port,
+    username,
+    authMethod,
+    password: asString(value.password),
+    privateKey: asString(value.privateKey),
+    passphrase: asString(value.passphrase),
+    agent: asString(value.agent),
+    hostFingerprint: asString(value.hostFingerprint),
+  };
+}
+
+function pathTypeFromSftpEntry(entry: {
+  longname: string;
+  attrs: {
+    isDirectory?: () => boolean;
+    isSymbolicLink?: () => boolean;
+    size: number;
+    mtime: number;
+    mode: number;
+  };
+}): 'file' | 'directory' | 'link' | 'other' {
+  if (typeof entry.attrs.isDirectory === 'function' && entry.attrs.isDirectory()) return 'directory';
+  if (typeof entry.attrs.isSymbolicLink === 'function' && entry.attrs.isSymbolicLink()) return 'link';
+  const first = String(entry.longname ?? '').slice(0, 1);
+  if (first === 'd') return 'directory';
+  if (first === 'l') return 'link';
+  if (first === '-') return 'file';
+  return 'other';
+}
+
+function ensureSftp(session: SshSessionState): Promise<SFTPWrapper> {
+  if (session.sftp) return Promise.resolve(session.sftp);
+  if (session.sftpPromise) return session.sftpPromise;
+  session.sftpPromise = new Promise<SFTPWrapper>((resolve, reject) => {
+    session.client.sftp((error, sftp) => {
+      if (error || !sftp) {
+        session.sftpPromise = null;
+        reject(error ?? new Error('Unable to start SFTP subsystem'));
+        return;
+      }
+      session.sftp = sftp;
+      resolve(sftp);
+    });
+  });
+  return session.sftpPromise;
+}
+
+function closeSshTerminal(pluginId: string, sessionId: string, terminalId: string): void {
+  const session = getSshSession(pluginId, sessionId);
+  if (!session) return;
+  const shell = session.shells.get(terminalId);
+  if (!shell) return;
+
+  shell.closing = true;
+  session.shells.delete(terminalId);
+  try {
+    shell.shell?.close();
+  } catch {
+    void 0;
+  }
+  shell.shell = null;
+  shell.shellPromise = null;
+
+  if (session.clientReady && !session.closing) {
+    session.status = 'ready';
+    sendSshStatus(pluginId, session, terminalId);
+  }
+
+  if (!session.hold && session.shells.size === 0 && !session.closing) {
+    disconnectSshSession(pluginId, sessionId);
+  }
+}
+
+function openSshShell(
+  pluginId: string,
+  session: SshSessionState,
+  terminalId: string,
+  cols: number,
+  rows: number,
+): Promise<ClientChannel> {
+  const existing = session.shells.get(terminalId);
+  if (existing?.shell) return Promise.resolve(existing.shell);
+  if (existing?.shellPromise) return existing.shellPromise;
+  if (!session.clientReady || session.closing) {
+    return Promise.reject(new Error('SSH connection is not ready for an interactive shell'));
+  }
+
+  const shellState: SshShellState = existing ?? {
+    terminalId,
+    shell: null,
+    shellPromise: null,
+    closing: false,
+    output: '',
+  };
+  session.shells.set(terminalId, shellState);
+  const nextCols = Math.max(40, Math.floor(cols));
+  const nextRows = Math.max(12, Math.floor(rows));
+  shellState.shellPromise = new Promise<ClientChannel>((resolve, reject) => {
+    session.client.shell(
+      { term: 'xterm-256color', cols: nextCols, rows: nextRows, width: nextCols * 8, height: nextRows * 18 },
+      (error, stream) => {
+        if (error || !stream) {
+          session.shells.delete(terminalId);
+          reject(error ?? new Error('Unable to open interactive shell'));
+          return;
+        }
+
+        if (shellState.closing || session.closing) {
+          try {
+            stream.close();
+          } catch {
+            void 0;
+          }
+          session.shells.delete(terminalId);
+          reject(new Error('SSH terminal was closed before it became ready'));
+          return;
+        }
+
+        shellState.shell = stream;
+        session.status = 'ready';
+        session.connectedAt ??= new Date().toISOString();
+        stream.on('data', (data: Buffer) => {
+          const output = data.toString('utf8');
+          appendSshShellOutput(session, shellState, output);
+          sendSshEvent(pluginId, {
+            type: 'data',
+            sessionId: session.sessionId,
+            terminalId,
+            stream: 'stdout',
+            data: output,
+          });
+        });
+        stream.stderr.on('data', (data: Buffer) => {
+          const output = data.toString('utf8');
+          appendSshShellOutput(session, shellState, output);
+          sendSshEvent(pluginId, {
+            type: 'data',
+            sessionId: session.sessionId,
+            terminalId,
+            stream: 'stderr',
+            data: output,
+          });
+        });
+        stream.on('close', () => {
+          shellState.shell = null;
+          session.shells.delete(terminalId);
+          if (shellState.closing || session.closing || !session.clientReady) return;
+
+          if (session.hold) {
+            // A held connection is the transport, not the current shell. Keep
+            // the authenticated client alive so the next attach can open a
+            // fresh shell without asking for credentials again.
+            session.status = 'ready';
+            sendSshEvent(pluginId, {
+              type: 'log',
+              sessionId: session.sessionId,
+              terminalId,
+              level: 'info',
+              message: 'Remote shell closed; SSH Hold connection remains available.',
+            });
+            sendSshStatus(pluginId, session, terminalId);
+            return;
+          }
+
+          if (session.shells.size === 0) {
+            session.closing = true;
+            session.clientReady = false;
+            session.status = 'closed';
+            sendSshEvent(pluginId, {
+              type: 'log',
+              sessionId: session.sessionId,
+              terminalId,
+              level: 'info',
+              message: 'Remote shell closed',
+            });
+            sendSshStatus(pluginId, session, terminalId);
+            getSshState(pluginId).delete(session.sessionId);
+            try {
+              session.client.end();
+            } catch {
+              void 0;
+            }
+          }
+        });
+        sendSshStatus(pluginId, session, terminalId);
+        resolve(stream);
+      },
+    );
+  }).finally(() => {
+    shellState.shellPromise = null;
+    if (!shellState.shell && session.shells.get(terminalId) === shellState) {
+      session.shells.delete(terminalId);
+    }
+  });
+  return shellState.shellPromise;
+}
+
+function disconnectSshSession(pluginId: string, sessionId: string): void {
+  const state = getSshState(pluginId);
+  const session = state.get(sessionId);
+  if (!session) return;
+
+  session.closing = true;
+  session.clientReady = false;
+  session.keyboardFinish?.([]);
+  session.keyboardFinish = null;
+  for (const shell of session.shells.values()) {
+    shell.closing = true;
+    try {
+      shell.shell?.close();
+    } catch {
+      void 0;
+    }
+    shell.shell = null;
+    shell.shellPromise = null;
+  }
+  session.shells.clear();
+  closeSshProxyStream(session);
+  try {
+    session.client.end();
+  } catch {
+    void 0;
+  }
+  session.status = 'closed';
+  sendSshStatus(pluginId, session);
+  state.delete(sessionId);
+}
+
+function cleanupSshPlugin(pluginId: string): void {
+  const state = sshPluginStates.get(pluginId);
+  if (!state) return;
+  Array.from(state.keys()).forEach((sessionId) => disconnectSshSession(pluginId, sessionId));
+  sshPluginStates.delete(pluginId);
+}
+
+function connectSshSession(
+  pluginId: string,
+  params: {
+    sessionId: string;
+    terminalId: string;
+    profileId?: string;
+    hidden?: boolean;
+    openShell?: boolean;
+    hold?: boolean;
+    holdKey?: string;
+    host: string;
+    port: number;
+    username: string;
+    authMethod: SshAuthMethod;
+    password?: string;
+    privateKey?: string;
+    passphrase?: string;
+    agent?: string;
+    hostFingerprint?: string;
+    cols?: number;
+    rows?: number;
+    proxyStream?: ClientChannel | null;
+    proxySessionId?: string;
+    proxyProfileId?: string;
+    proxyName?: string;
+    proxyHost?: string;
+    proxyUsername?: string;
+  },
+): Promise<SshSessionState> {
+  const state = getSshState(pluginId);
+  const existing = state.get(params.sessionId);
+  if (existing) void disconnectSshSession(pluginId, existing.sessionId);
+
+  const session: SshSessionState = {
+    sessionId: params.sessionId,
+    profileId: params.profileId,
+    hidden: params.hidden === true,
+    hold: params.hold === true,
+    holdKey: params.holdKey,
+    host: params.host,
+    port: params.port,
+    username: params.username,
+    client: new Client(),
+    shells: new Map(),
+    clientReady: false,
+    closing: false,
+    sftp: null,
+    sftpPromise: null,
+    keyboardFinish: null,
+    status: 'connecting',
+    output: '',
+    proxySessionId: params.proxySessionId,
+    proxyProfileId: params.proxyProfileId,
+    proxyName: params.proxyName,
+    proxyHost: params.proxyHost,
+    proxyUsername: params.proxyUsername,
+    proxyStream: params.proxyStream ?? null,
+  };
+  state.set(session.sessionId, session);
+  sendSshStatus(pluginId, session);
+  sendSshEvent(pluginId, {
+    type: 'log',
+    sessionId: session.sessionId,
+    terminalId: params.openShell === false ? undefined : params.terminalId,
+    level: 'info',
+    message: params.proxySessionId
+      ? `Connecting to ${params.username}@${params.host}:${params.port} through SSH proxy ${params.proxyName ?? params.proxyHost ?? params.proxySessionId}...`
+      : `Connecting to ${params.username}@${params.host}:${params.port}...`,
+  });
+  sendSshEvent(pluginId, {
+    type: 'log',
+    sessionId: session.sessionId,
+    terminalId: params.openShell === false ? undefined : params.terminalId,
+    level: 'info',
+    message: `Authentication method: ${params.authMethod}`,
+  });
+
+  const expectedFingerprint = normalizeSshFingerprint(String(params.hostFingerprint ?? ''));
+  const config: ConnectConfig = {
+    host: params.host,
+    port: params.port,
+    username: params.username,
+    readyTimeout: 20000,
+    keepaliveInterval: 15000,
+    keepaliveCountMax: 3,
+    hostHash: 'sha256',
+    hostVerifier: (fingerprint: string) => {
+      session.fingerprint = fingerprint;
+      const verified =
+        Boolean(expectedFingerprint) && normalizeSshFingerprint(fingerprint) === expectedFingerprint;
+      sendSshEvent(pluginId, {
+        type: 'log',
+        sessionId: session.sessionId,
+        terminalId: params.openShell === false ? undefined : params.terminalId,
+        level: verified || !expectedFingerprint ? 'info' : 'error',
+        message: expectedFingerprint
+          ? `Checking host key fingerprint: ${fingerprint}`
+          : `Server host key fingerprint: ${fingerprint}`,
+      });
+      sendSshEvent(pluginId, { type: 'hostKey', sessionId: session.sessionId, fingerprint, verified });
+      if (!expectedFingerprint) {
+        sendSshEvent(pluginId, {
+          type: 'log',
+          sessionId: session.sessionId,
+          level: 'warn',
+          message: 'Server key was accepted without a pinned fingerprint.',
+        });
+      }
+      return !expectedFingerprint || verified;
+    },
+  };
+  if (params.proxyStream) config.sock = params.proxyStream;
+
+  if (params.authMethod === 'password') {
+    if (!params.password) {
+      state.delete(session.sessionId);
+      return Promise.reject(new Error('Password is required for password authentication'));
+    }
+    config.password = params.password;
+    config.authHandler = ['password'];
+  } else if (params.authMethod === 'privateKey') {
+    if (!params.privateKey) {
+      state.delete(session.sessionId);
+      return Promise.reject(new Error('Private key is required for key authentication'));
+    }
+    config.privateKey = params.privateKey;
+    if (params.passphrase) config.passphrase = params.passphrase;
+    config.authHandler = ['publickey'];
+  } else if (params.authMethod === 'agent') {
+    const agent = String(params.agent ?? '').trim() || String(process.env.SSH_AUTH_SOCK ?? '').trim();
+    if (!agent) {
+      state.delete(session.sessionId);
+      return Promise.reject(new Error('No SSH agent socket was provided and SSH_AUTH_SOCK is empty'));
+    }
+    config.agent = agent;
+    config.authHandler = ['agent'];
+  } else {
+    config.tryKeyboard = true;
+    config.authHandler = ['keyboard-interactive'];
+  }
+
+  return new Promise<SshSessionState>((resolve, reject) => {
+    let settled = false;
+    const fail = (error: unknown) => {
+      const message = sshErrorMessage(error, 'SSH connection failed');
+      if (session.closing) return;
+      session.closing = true;
+      session.clientReady = false;
+      session.status = 'error';
+      sendSshEvent(pluginId, { type: 'log', sessionId: session.sessionId, level: 'error', message });
+      sendSshStatus(pluginId, session);
+      state.delete(session.sessionId);
+      closeSshProxyStream(session);
+      try {
+        session.client.end();
+      } catch {
+        void 0;
+      }
+      if (!settled) {
+        settled = true;
+        reject(new Error(message));
+      }
+    };
+
+    session.client.on('banner', (message) => {
+      appendSshOutput(session, `${message}\r\n`);
+      sendSshEvent(pluginId, {
+        type: 'data',
+        sessionId: session.sessionId,
+        terminalId: params.terminalId,
+        stream: 'stdout',
+        data: `${message}\r\n`,
+      });
+    });
+    session.client.on('keyboard-interactive', (name, instructions, _lang, prompts: Prompt[], finish) => {
+      session.keyboardFinish = finish;
+      sendSshEvent(pluginId, {
+        type: 'keyboardInteractive',
+        sessionId: session.sessionId,
+        terminalId: params.terminalId,
+        name,
+        instructions,
+        prompts: prompts.map((prompt) => ({ prompt: prompt.prompt, echo: prompt.echo })),
+      });
+    });
+    session.client.on('ready', () => {
+      session.clientReady = true;
+      session.status = 'ready';
+      session.connectedAt ??= new Date().toISOString();
+      sendSshEvent(pluginId, {
+        type: 'log',
+        sessionId: session.sessionId,
+        terminalId: params.openShell === false ? undefined : params.terminalId,
+        level: 'info',
+        message: 'SSH authentication completed.',
+      });
+      if (params.openShell === false) {
+        sendSshEvent(pluginId, {
+          type: 'log',
+          sessionId: session.sessionId,
+          level: 'info',
+          message: 'SSH proxy transport is ready for reuse.',
+        });
+        sendSshStatus(pluginId, session);
+        settled = true;
+        resolve(session);
+        return;
+      }
+      const cols = Number(params.cols ?? 100);
+      const rows = Number(params.rows ?? 30);
+      void openSshShell(pluginId, session, params.terminalId, cols, rows)
+        .then(() => {
+          settled = true;
+          resolve(session);
+        })
+        .catch((error: unknown) => fail(error));
+    });
+    session.client.on('error', (error) => fail(error));
+    session.client.on('close', () => {
+      session.clientReady = false;
+      session.shells.clear();
+      if (session.status === 'connecting') {
+        fail(new Error('SSH connection closed before authentication completed'));
+        return;
+      }
+      if (!session.closing) {
+        session.closing = true;
+        session.status = 'closed';
+        closeSshProxyStream(session);
+        sendSshStatus(pluginId, session);
+        getSshState(pluginId).delete(session.sessionId);
+      }
+    });
+
+    try {
+      session.client.connect(config);
+    } catch (error) {
+      fail(error);
+    }
+  });
+}
+
+function setToken(
+  map: Map<string, Map<string, string>>,
+  pluginId: string,
+  token: string,
+  value: string,
+): void {
   const inner = map.get(pluginId) ?? new Map<string, string>();
   inner.set(token, value);
   map.set(pluginId, inner);
 }
 
-function getToken(map: Map<string, Map<string, string>>, pluginId: string, token: string): string | undefined {
+function getToken(
+  map: Map<string, Map<string, string>>,
+  pluginId: string,
+  token: string,
+): string | undefined {
   return map.get(pluginId)?.get(token);
 }
 
@@ -655,7 +1501,8 @@ export function register(): void {
       const cachedFetchedAt = isRecord(cached) && typeof cached.fetchedAt === 'number' ? cached.fetchedAt : 0;
       const cachedRegistry = isRecord(cached) ? cached.registry : undefined;
       const cachedEtag = isRecord(cached) && typeof cached.etag === 'string' ? cached.etag : undefined;
-      const cachedLastModified = isRecord(cached) && typeof cached.lastModified === 'string' ? cached.lastModified : undefined;
+      const cachedLastModified =
+        isRecord(cached) && typeof cached.lastModified === 'string' ? cached.lastModified : undefined;
 
       const ttlMs = 6 * 60 * 60 * 1000;
       if (!force && cachedRegistry && Date.now() - cachedFetchedAt < ttlMs) {
@@ -721,7 +1568,10 @@ export function register(): void {
       dbg('marketplace', 'registry:fetch:ok', { url: u.toString(), cachePath });
       return { success: true, registry: json };
     } catch (e: unknown) {
-      dbg('marketplace', 'registry:fetch:error', { url: String(url ?? ''), error: e instanceof Error ? e.message : String(e) });
+      dbg('marketplace', 'registry:fetch:error', {
+        url: String(url ?? ''),
+        error: e instanceof Error ? e.message : String(e),
+      });
       return { success: false, error: e instanceof Error ? e.message : String(e) };
     }
   });
@@ -746,7 +1596,10 @@ export function register(): void {
       rec.enabled = Boolean(enabled);
       state.installed[id] = rec;
       writeState(state);
-      if (!rec.enabled) await cleanupSocketPlugin(rec.id);
+      if (!rec.enabled) {
+        await cleanupSocketPlugin(rec.id);
+        cleanupSshPlugin(rec.id);
+      }
       return { success: true };
     } catch (e: unknown) {
       return { success: false, error: e instanceof Error ? e.message : String(e) };
@@ -759,6 +1612,7 @@ export function register(): void {
       const rec = state.installed[id];
       if (!rec) return { success: false, error: 'Plugin not installed' };
       await cleanupSocketPlugin(rec.id);
+      cleanupSshPlugin(rec.id);
       fileTokenMap.delete(rec.id);
       pathTokenMap.delete(rec.id);
 
@@ -778,17 +1632,27 @@ export function register(): void {
 
   ipcMain.handle('marketplace:install', async (_event, entry: MarketplaceRegistryEntry) => {
     try {
-      if (!entry?.manifest?.id || !entry?.manifest?.version) return { success: false, error: 'Invalid entry' };
+      if (!entry?.manifest?.id || !entry?.manifest?.version)
+        return { success: false, error: 'Invalid entry' };
       const registryManifest = entry.manifest;
-      const expectedSha = String(entry.sha256 ?? '').trim().toLowerCase();
+      const expectedSha = String(entry.sha256 ?? '')
+        .trim()
+        .toLowerCase();
       if (!/^[a-f0-9]{64}$/.test(expectedSha)) return { success: false, error: 'Invalid sha256' };
-      dbg('marketplace', 'install:start', { id: registryManifest.id, version: registryManifest.version, sha256: expectedSha });
+      dbg('marketplace', 'install:start', {
+        id: registryManifest.id,
+        version: registryManifest.version,
+        sha256: expectedSha,
+      });
       const isDev = Boolean(process.env.VITE_DEV_SERVER_URL) || !app.isPackaged;
       let download: URL;
       try {
         download = new URL(String(entry.downloadUrl ?? '').trim());
       } catch {
-        dbg('marketplace', 'install:failed', { reason: 'downloadUrl_invalid', downloadUrl: String(entry.downloadUrl ?? '') });
+        dbg('marketplace', 'install:failed', {
+          reason: 'downloadUrl_invalid',
+          downloadUrl: String(entry.downloadUrl ?? ''),
+        });
         return { success: false, error: 'Invalid downloadUrl' };
       }
       const baseDir = getInstallBaseDir();
@@ -832,13 +1696,19 @@ export function register(): void {
           return { success: false, error: 'Registry is using placeholder downloadUrl.' };
         }
         if (isForbiddenTarget(download.hostname)) {
-          dbg('marketplace', 'install:failed', { reason: 'forbidden_download_host', hostname: download.hostname });
+          dbg('marketplace', 'install:failed', {
+            reason: 'forbidden_download_host',
+            hostname: download.hostname,
+          });
           return { success: false, error: 'Forbidden download host' };
         }
 
         if (!fs.existsSync(cachedZipPath)) {
           dbg('marketplace', 'install:zip:cache-miss', { cachedZipPath, downloadUrl: download.toString() });
-          const tmpFile = path.join(app.getPath('temp'), `devtoolbox_${registryManifest.id}_${Date.now()}.zip`);
+          const tmpFile = path.join(
+            app.getPath('temp'),
+            `devtoolbox_${registryManifest.id}_${Date.now()}.zip`,
+          );
           const dl = await downloadToFile(download.toString(), tmpFile);
           if (!dl.ok) return { success: false, error: dl.error ?? 'Download failed' };
 
@@ -953,7 +1823,8 @@ export function register(): void {
   ipcMain.handle('plugin:socketServerStart', async (_event, pluginId: string, params: unknown) => {
     const rec = assertInstalledPlugin(pluginId);
     if (!rec) return err('not_installed', 'Plugin not installed');
-    if (!hasPermission(rec.manifest, 'net:socket')) return err('permission_denied', 'Missing permission: net:socket');
+    if (!hasPermission(rec.manifest, 'net:socket'))
+      return err('permission_denied', 'Missing permission: net:socket');
     try {
       const p = isRecord(params) ? params : {};
       const protocol: SocketProtocol = asString(p.protocol, 'tcp') === 'udp' ? 'udp' : 'tcp';
@@ -971,7 +1842,12 @@ export function register(): void {
       st.server.totalRecvBytes = 0;
       st.server.totalSentBytes = 0;
 
-      sendSocketEvent(pluginId, { type: 'log', target: 'server', level: 'info', message: `${protocol} server start ${host}:${port}` });
+      sendSocketEvent(pluginId, {
+        type: 'log',
+        target: 'server',
+        level: 'info',
+        message: `${protocol} server start ${host}:${port}`,
+      });
 
       if (protocol === 'tcp') {
         const srv = net.createServer();
@@ -980,10 +1856,25 @@ export function register(): void {
         srv.on('connection', (socket) => {
           const id = crypto.randomBytes(8).toString('hex');
           const remote = `${socket.remoteAddress ?? '-'}:${socket.remotePort ?? ''}`;
-          const info: SocketConnInfo = { id, remote, connectedAt: socketNowIso(), recvBytes: 0, sentBytes: 0 };
+          const info: SocketConnInfo = {
+            id,
+            remote,
+            connectedAt: socketNowIso(),
+            recvBytes: 0,
+            sentBytes: 0,
+          };
           st.server.tcpClients.set(id, { socket, info });
-          sendSocketEvent(pluginId, { type: 'log', target: 'server', level: 'info', message: `tcp client connected ${remote} (${id})` });
-          sendSocketEvent(pluginId, { type: 'status', target: 'server', status: buildSocketServerStatus(pluginId) });
+          sendSocketEvent(pluginId, {
+            type: 'log',
+            target: 'server',
+            level: 'info',
+            message: `tcp client connected ${remote} (${id})`,
+          });
+          sendSocketEvent(pluginId, {
+            type: 'status',
+            target: 'server',
+            status: buildSocketServerStatus(pluginId),
+          });
 
           socket.on('data', (buf) => {
             info.recvBytes += buf.length;
@@ -994,12 +1885,25 @@ export function register(): void {
               target: 'server',
               data: { direction: 'recv', protocol: 'tcp', remote, connId: id, ...fmt },
             });
-            sendSocketEvent(pluginId, { type: 'status', target: 'server', status: buildSocketServerStatus(pluginId) });
+            sendSocketEvent(pluginId, {
+              type: 'status',
+              target: 'server',
+              status: buildSocketServerStatus(pluginId),
+            });
           });
           socket.on('close', () => {
             st.server.tcpClients.delete(id);
-            sendSocketEvent(pluginId, { type: 'log', target: 'server', level: 'info', message: `tcp client closed ${remote} (${id})` });
-            sendSocketEvent(pluginId, { type: 'status', target: 'server', status: buildSocketServerStatus(pluginId) });
+            sendSocketEvent(pluginId, {
+              type: 'log',
+              target: 'server',
+              level: 'info',
+              message: `tcp client closed ${remote} (${id})`,
+            });
+            sendSocketEvent(pluginId, {
+              type: 'status',
+              target: 'server',
+              status: buildSocketServerStatus(pluginId),
+            });
           });
           socket.on('error', (e) => {
             sendSocketEvent(pluginId, {
@@ -1036,8 +1940,16 @@ export function register(): void {
         st.server.lastRemote = remote;
         st.server.totalRecvBytes += msg.length;
         const fmt = socketFormatBuf(msg);
-        sendSocketEvent(pluginId, { type: 'data', target: 'server', data: { direction: 'recv', protocol: 'udp', remote, ...fmt } });
-        sendSocketEvent(pluginId, { type: 'status', target: 'server', status: buildSocketServerStatus(pluginId) });
+        sendSocketEvent(pluginId, {
+          type: 'data',
+          target: 'server',
+          data: { direction: 'recv', protocol: 'udp', remote, ...fmt },
+        });
+        sendSocketEvent(pluginId, {
+          type: 'status',
+          target: 'server',
+          status: buildSocketServerStatus(pluginId),
+        });
       });
 
       await new Promise<void>((resolve, reject) => {
@@ -1056,7 +1968,8 @@ export function register(): void {
   ipcMain.handle('plugin:socketServerStop', async (_event, pluginId: string) => {
     const rec = assertInstalledPlugin(pluginId);
     if (!rec) return err('not_installed', 'Plugin not installed');
-    if (!hasPermission(rec.manifest, 'net:socket')) return err('permission_denied', 'Missing permission: net:socket');
+    if (!hasPermission(rec.manifest, 'net:socket'))
+      return err('permission_denied', 'Missing permission: net:socket');
     try {
       await stopSocketServer(pluginId);
       return ok(buildSocketServerStatus(pluginId));
@@ -1068,7 +1981,8 @@ export function register(): void {
   ipcMain.handle('plugin:socketServerStatus', (_event, pluginId: string) => {
     const rec = assertInstalledPlugin(pluginId);
     if (!rec) return err('not_installed', 'Plugin not installed');
-    if (!hasPermission(rec.manifest, 'net:socket')) return err('permission_denied', 'Missing permission: net:socket');
+    if (!hasPermission(rec.manifest, 'net:socket'))
+      return err('permission_denied', 'Missing permission: net:socket');
     try {
       return ok(buildSocketServerStatus(pluginId));
     } catch (e: unknown) {
@@ -1079,7 +1993,8 @@ export function register(): void {
   ipcMain.handle('plugin:socketServerKick', (_event, pluginId: string, params: unknown) => {
     const rec = assertInstalledPlugin(pluginId);
     if (!rec) return err('not_installed', 'Plugin not installed');
-    if (!hasPermission(rec.manifest, 'net:socket')) return err('permission_denied', 'Missing permission: net:socket');
+    if (!hasPermission(rec.manifest, 'net:socket'))
+      return err('permission_denied', 'Missing permission: net:socket');
     try {
       const st = getSocketState(pluginId);
       const p = isRecord(params) ? params : {};
@@ -1104,7 +2019,8 @@ export function register(): void {
   ipcMain.handle('plugin:socketServerSend', async (_event, pluginId: string, params: unknown) => {
     const rec = assertInstalledPlugin(pluginId);
     if (!rec) return err('not_installed', 'Plugin not installed');
-    if (!hasPermission(rec.manifest, 'net:socket')) return err('permission_denied', 'Missing permission: net:socket');
+    if (!hasPermission(rec.manifest, 'net:socket'))
+      return err('permission_denied', 'Missing permission: net:socket');
     try {
       const st = getSocketState(pluginId);
       const p = isRecord(params) ? params : {};
@@ -1158,7 +2074,11 @@ export function register(): void {
       });
       st.server.totalSentBytes += buf.length;
       const fmt = socketFormatBuf(buf);
-      sendSocketEvent(pluginId, { type: 'data', target: 'server', data: { direction: 'sent', protocol: 'udp', remote: `${rh}:${rport}`, ...fmt } });
+      sendSocketEvent(pluginId, {
+        type: 'data',
+        target: 'server',
+        data: { direction: 'sent', protocol: 'udp', remote: `${rh}:${rport}`, ...fmt },
+      });
       const status = buildSocketServerStatus(pluginId);
       sendSocketEvent(pluginId, { type: 'status', target: 'server', status });
       return ok(true);
@@ -1170,7 +2090,8 @@ export function register(): void {
   ipcMain.handle('plugin:socketClientConnect', async (_event, pluginId: string, params: unknown) => {
     const rec = assertInstalledPlugin(pluginId);
     if (!rec) return err('not_installed', 'Plugin not installed');
-    if (!hasPermission(rec.manifest, 'net:socket')) return err('permission_denied', 'Missing permission: net:socket');
+    if (!hasPermission(rec.manifest, 'net:socket'))
+      return err('permission_denied', 'Missing permission: net:socket');
     try {
       const p = isRecord(params) ? params : {};
       const protocol: SocketProtocol = asString(p.protocol, 'tcp') === 'udp' ? 'udp' : 'tcp';
@@ -1188,7 +2109,12 @@ export function register(): void {
       st.client.totalRecvBytes = 0;
       st.client.totalSentBytes = 0;
 
-      sendSocketEvent(pluginId, { type: 'log', target: 'client', level: 'info', message: `${protocol} client connect ${host}:${port}` });
+      sendSocketEvent(pluginId, {
+        type: 'log',
+        target: 'client',
+        level: 'info',
+        message: `${protocol} client connect ${host}:${port}`,
+      });
 
       if (protocol === 'tcp') {
         const sock = new net.Socket();
@@ -1196,15 +2122,33 @@ export function register(): void {
         sock.on('data', (buf) => {
           st.client.totalRecvBytes += buf.length;
           const fmt = socketFormatBuf(buf);
-          sendSocketEvent(pluginId, { type: 'data', target: 'client', data: { direction: 'recv', protocol: 'tcp', remote: `${host}:${port}`, ...fmt } });
-          sendSocketEvent(pluginId, { type: 'status', target: 'client', status: buildSocketClientStatus(pluginId) });
+          sendSocketEvent(pluginId, {
+            type: 'data',
+            target: 'client',
+            data: { direction: 'recv', protocol: 'tcp', remote: `${host}:${port}`, ...fmt },
+          });
+          sendSocketEvent(pluginId, {
+            type: 'status',
+            target: 'client',
+            status: buildSocketClientStatus(pluginId),
+          });
         });
         sock.on('close', () => {
-          sendSocketEvent(pluginId, { type: 'log', target: 'client', level: 'info', message: `tcp client closed` });
+          sendSocketEvent(pluginId, {
+            type: 'log',
+            target: 'client',
+            level: 'info',
+            message: `tcp client closed`,
+          });
           void stopSocketClient(pluginId);
         });
         sock.on('error', (e) => {
-          sendSocketEvent(pluginId, { type: 'log', target: 'client', level: 'error', message: `tcp client error ${e instanceof Error ? e.message : String(e)}` });
+          sendSocketEvent(pluginId, {
+            type: 'log',
+            target: 'client',
+            level: 'error',
+            message: `tcp client error ${e instanceof Error ? e.message : String(e)}`,
+          });
         });
 
         await new Promise<void>((resolve, reject) => {
@@ -1219,13 +2163,26 @@ export function register(): void {
       const sock = dgram.createSocket('udp4');
       st.client.udpSocket = sock;
       sock.on('error', (e) => {
-        sendSocketEvent(pluginId, { type: 'log', target: 'client', level: 'error', message: `udp client error ${e instanceof Error ? e.message : String(e)}` });
+        sendSocketEvent(pluginId, {
+          type: 'log',
+          target: 'client',
+          level: 'error',
+          message: `udp client error ${e instanceof Error ? e.message : String(e)}`,
+        });
       });
       sock.on('message', (msg, rinfo) => {
         st.client.totalRecvBytes += msg.length;
         const fmt = socketFormatBuf(msg);
-        sendSocketEvent(pluginId, { type: 'data', target: 'client', data: { direction: 'recv', protocol: 'udp', remote: `${rinfo.address}:${rinfo.port}`, ...fmt } });
-        sendSocketEvent(pluginId, { type: 'status', target: 'client', status: buildSocketClientStatus(pluginId) });
+        sendSocketEvent(pluginId, {
+          type: 'data',
+          target: 'client',
+          data: { direction: 'recv', protocol: 'udp', remote: `${rinfo.address}:${rinfo.port}`, ...fmt },
+        });
+        sendSocketEvent(pluginId, {
+          type: 'status',
+          target: 'client',
+          status: buildSocketClientStatus(pluginId),
+        });
       });
       await new Promise<void>((resolve, reject) => {
         sock.bind(0, () => resolve());
@@ -1243,7 +2200,8 @@ export function register(): void {
   ipcMain.handle('plugin:socketClientDisconnect', async (_event, pluginId: string) => {
     const rec = assertInstalledPlugin(pluginId);
     if (!rec) return err('not_installed', 'Plugin not installed');
-    if (!hasPermission(rec.manifest, 'net:socket')) return err('permission_denied', 'Missing permission: net:socket');
+    if (!hasPermission(rec.manifest, 'net:socket'))
+      return err('permission_denied', 'Missing permission: net:socket');
     try {
       await stopSocketClient(pluginId);
       return ok(buildSocketClientStatus(pluginId));
@@ -1255,7 +2213,8 @@ export function register(): void {
   ipcMain.handle('plugin:socketClientStatus', (_event, pluginId: string) => {
     const rec = assertInstalledPlugin(pluginId);
     if (!rec) return err('not_installed', 'Plugin not installed');
-    if (!hasPermission(rec.manifest, 'net:socket')) return err('permission_denied', 'Missing permission: net:socket');
+    if (!hasPermission(rec.manifest, 'net:socket'))
+      return err('permission_denied', 'Missing permission: net:socket');
     try {
       return ok(buildSocketClientStatus(pluginId));
     } catch (e: unknown) {
@@ -1266,7 +2225,8 @@ export function register(): void {
   ipcMain.handle('plugin:socketClientSend', async (_event, pluginId: string, params: unknown) => {
     const rec = assertInstalledPlugin(pluginId);
     if (!rec) return err('not_installed', 'Plugin not installed');
-    if (!hasPermission(rec.manifest, 'net:socket')) return err('permission_denied', 'Missing permission: net:socket');
+    if (!hasPermission(rec.manifest, 'net:socket'))
+      return err('permission_denied', 'Missing permission: net:socket');
     try {
       const st = getSocketState(pluginId);
       const p = isRecord(params) ? params : {};
@@ -1281,8 +2241,21 @@ export function register(): void {
         st.client.tcpSocket.write(buf);
         st.client.totalSentBytes += buf.length;
         const fmt = socketFormatBuf(buf);
-        sendSocketEvent(pluginId, { type: 'data', target: 'client', data: { direction: 'sent', protocol: 'tcp', remote: `${st.client.remoteHost}:${st.client.remotePort}`, ...fmt } });
-        sendSocketEvent(pluginId, { type: 'status', target: 'client', status: buildSocketClientStatus(pluginId) });
+        sendSocketEvent(pluginId, {
+          type: 'data',
+          target: 'client',
+          data: {
+            direction: 'sent',
+            protocol: 'tcp',
+            remote: `${st.client.remoteHost}:${st.client.remotePort}`,
+            ...fmt,
+          },
+        });
+        sendSocketEvent(pluginId, {
+          type: 'status',
+          target: 'client',
+          status: buildSocketClientStatus(pluginId),
+        });
         return ok(true);
       }
 
@@ -1295,18 +2268,435 @@ export function register(): void {
       });
       st.client.totalSentBytes += buf.length;
       const fmt = socketFormatBuf(buf);
-      sendSocketEvent(pluginId, { type: 'data', target: 'client', data: { direction: 'sent', protocol: 'udp', remote: `${st.client.remoteHost}:${st.client.remotePort}`, ...fmt } });
-      sendSocketEvent(pluginId, { type: 'status', target: 'client', status: buildSocketClientStatus(pluginId) });
+      sendSocketEvent(pluginId, {
+        type: 'data',
+        target: 'client',
+        data: {
+          direction: 'sent',
+          protocol: 'udp',
+          remote: `${st.client.remoteHost}:${st.client.remotePort}`,
+          ...fmt,
+        },
+      });
+      sendSocketEvent(pluginId, {
+        type: 'status',
+        target: 'client',
+        status: buildSocketClientStatus(pluginId),
+      });
       return ok(true);
     } catch (e: unknown) {
       return err('io_error', e instanceof Error ? e.message : String(e));
     }
   });
 
+  ipcMain.handle('plugin:sshConnect', async (_event, pluginId: string, params: unknown) => {
+    const rec = assertInstalledPlugin(pluginId);
+    if (!rec) return err('not_installed', 'Plugin not installed');
+    if (!hasPermission(rec.manifest, 'net:ssh'))
+      return err('permission_denied', 'Missing permission: net:ssh');
+    const p = isRecord(params) ? params : {};
+    const sessionId = asString(p.sessionId).trim();
+    const terminalId = asString(p.terminalId, `${sessionId}:terminal`).trim();
+    const profileId = asString(p.profileId).trim() || undefined;
+    const hold = p.hold === true;
+    const holdKey = asString(p.holdKey, profileId ?? sessionId).trim() || undefined;
+    const host = asString(p.host).trim();
+    const username = asString(p.username).trim();
+    const port = Math.floor(Number(p.port ?? 22));
+    const authMethod = asString(p.authMethod, 'password') as SshAuthMethod;
+    let proxy: SshProxyConnectParams | undefined;
+    try {
+      proxy = parseSshProxyConnectParams(p.proxy);
+    } catch (e: unknown) {
+      return err('invalid_params', sshErrorMessage(e, 'Invalid SSH proxy configuration'));
+    }
+    if (!sessionId || !host || !username)
+      return err('invalid_params', 'sessionId, host, and username are required');
+    if (!port || port < 1 || port > 65535) return err('invalid_params', 'Invalid SSH port');
+    if (!['password', 'privateKey', 'agent', 'keyboard-interactive'].includes(authMethod)) {
+      return err('invalid_params', 'Unsupported SSH authentication method');
+    }
+    if (proxy && proxy.host === host && proxy.port === port && proxy.username === username) {
+      return err('invalid_params', 'SSH proxy cannot be the same endpoint as the target session');
+    }
+
+    const state = getSshState(pluginId);
+    if (hold && holdKey) {
+      const heldByKey = findHeldSshSessionByKey(pluginId, holdKey);
+      const held = findHeldSshSession(pluginId, holdKey, { host, port, username });
+      if (heldByKey && !held) {
+        return err(
+          'hold_conflict',
+          `SSH Hold "${holdKey}" is already connected to ${heldByKey.username}@${heldByKey.host}:${heldByKey.port}. Stop it before changing the host.`,
+        );
+      }
+      if (held) {
+        try {
+          held.hidden = false;
+          await openSshShell(pluginId, held, terminalId, Number(p.cols ?? 100), Number(p.rows ?? 30));
+          return ok(buildSshSessionSummary(held, terminalId));
+        } catch (e: unknown) {
+          disconnectSshSession(pluginId, held.sessionId);
+          return err('ssh_error', sshErrorMessage(e, 'Unable to reopen the held SSH shell'));
+        }
+      }
+    }
+    if (state.has(sessionId)) disconnectSshSession(pluginId, sessionId);
+
+    let proxySession: SshSessionState | undefined;
+    let proxyStream: ClientChannel | null = null;
+    try {
+      if (proxy) {
+        proxySession = await ensureSshProxySession(pluginId, proxy);
+        proxyStream = await openSshProxyStream(proxySession, host, port);
+      }
+      const session = await connectSshSession(pluginId, {
+        sessionId,
+        terminalId,
+        profileId,
+        hidden: false,
+        hold,
+        holdKey,
+        host,
+        port,
+        username,
+        authMethod,
+        password: asString(p.password),
+        privateKey: asString(p.privateKey),
+        passphrase: asString(p.passphrase),
+        agent: asString(p.agent),
+        hostFingerprint: asString(p.hostFingerprint),
+        cols: Number(p.cols ?? 100),
+        rows: Number(p.rows ?? 30),
+        proxyStream,
+        proxySessionId: proxySession?.sessionId,
+        proxyProfileId: proxy?.profileId,
+        proxyName: proxy?.name,
+        proxyHost: proxy?.host,
+        proxyUsername: proxy?.username,
+      });
+      return ok(buildSshSessionSummary(session, terminalId));
+    } catch (e: unknown) {
+      try {
+        proxyStream?.close();
+      } catch {
+        void 0;
+      }
+      return err('ssh_error', sshErrorMessage(e, 'SSH connection failed'));
+    }
+  });
+
+  ipcMain.handle('plugin:sshDisconnect', (_event, pluginId: string, params: unknown) => {
+    const rec = assertInstalledPlugin(pluginId);
+    if (!rec) return err('not_installed', 'Plugin not installed');
+    if (!hasPermission(rec.manifest, 'net:ssh'))
+      return err('permission_denied', 'Missing permission: net:ssh');
+    const p = isRecord(params) ? params : {};
+    const sessionId = asString(p.sessionId).trim();
+    if (!sessionId) return err('invalid_params', 'sessionId is required');
+    disconnectSshSession(pluginId, sessionId);
+    return ok(true);
+  });
+
+  ipcMain.handle('plugin:sshListSessions', (_event, pluginId: string) => {
+    const rec = assertInstalledPlugin(pluginId);
+    if (!rec) return err('not_installed', 'Plugin not installed');
+    if (!hasPermission(rec.manifest, 'net:ssh'))
+      return err('permission_denied', 'Missing permission: net:ssh');
+    return ok(Array.from(getSshState(pluginId).values()).map((session) => buildSshSessionSummary(session)));
+  });
+
+  ipcMain.handle('plugin:sshCloseTerminal', (_event, pluginId: string, params: unknown) => {
+    const rec = assertInstalledPlugin(pluginId);
+    if (!rec) return err('not_installed', 'Plugin not installed');
+    if (!hasPermission(rec.manifest, 'net:ssh'))
+      return err('permission_denied', 'Missing permission: net:ssh');
+    const p = isRecord(params) ? params : {};
+    const sessionId = asString(p.sessionId).trim();
+    const terminalId = asString(p.terminalId).trim();
+    if (!sessionId || !terminalId) return err('invalid_params', 'sessionId and terminalId are required');
+    closeSshTerminal(pluginId, sessionId, terminalId);
+    return ok(true);
+  });
+
+  ipcMain.handle('plugin:sshWrite', (_event, pluginId: string, params: unknown) => {
+    const rec = assertInstalledPlugin(pluginId);
+    if (!rec) return err('not_installed', 'Plugin not installed');
+    if (!hasPermission(rec.manifest, 'net:ssh'))
+      return err('permission_denied', 'Missing permission: net:ssh');
+    const p = isRecord(params) ? params : {};
+    const sessionId = asString(p.sessionId).trim();
+    const terminalId = asString(p.terminalId).trim();
+    const data = asString(p.data);
+    const session = getSshSession(pluginId, sessionId);
+    const shell = session ? getSshShell(session, terminalId) : undefined;
+    if (!session || !shell?.shell || session.status !== 'ready')
+      return err('invalid_state', 'SSH shell is not ready');
+    if (!data) return ok(true);
+    if (data.length > 128 * 1024) return err('invalid_params', 'Terminal input is too large');
+    try {
+      shell.shell.write(data);
+      return ok(true);
+    } catch (e: unknown) {
+      return err('io_error', sshErrorMessage(e, 'Unable to write to SSH shell'));
+    }
+  });
+
+  ipcMain.handle('plugin:sshResize', (_event, pluginId: string, params: unknown) => {
+    const rec = assertInstalledPlugin(pluginId);
+    if (!rec) return err('not_installed', 'Plugin not installed');
+    if (!hasPermission(rec.manifest, 'net:ssh'))
+      return err('permission_denied', 'Missing permission: net:ssh');
+    const p = isRecord(params) ? params : {};
+    const sessionId = asString(p.sessionId).trim();
+    const terminalId = asString(p.terminalId).trim();
+    const cols = Math.max(20, Math.min(500, Math.floor(Number(p.cols ?? 100))));
+    const rows = Math.max(8, Math.min(200, Math.floor(Number(p.rows ?? 30))));
+    const session = getSshSession(pluginId, sessionId);
+    const shell = session ? getSshShell(session, terminalId) : undefined;
+    if (!session || !shell?.shell || session.status !== 'ready')
+      return err('invalid_state', 'SSH shell is not ready');
+    try {
+      shell.shell.setWindow(rows, cols, rows * 18, cols * 8);
+      return ok(true);
+    } catch (e: unknown) {
+      return err('io_error', sshErrorMessage(e, 'Unable to resize SSH shell'));
+    }
+  });
+
+  ipcMain.handle('plugin:sshRespondKeyboard', (_event, pluginId: string, params: unknown) => {
+    const rec = assertInstalledPlugin(pluginId);
+    if (!rec) return err('not_installed', 'Plugin not installed');
+    if (!hasPermission(rec.manifest, 'net:ssh'))
+      return err('permission_denied', 'Missing permission: net:ssh');
+    const p = isRecord(params) ? params : {};
+    const sessionId = asString(p.sessionId).trim();
+    const answers = Array.isArray(p.answers) ? p.answers.map((value) => String(value ?? '')) : [];
+    const session = getSshSession(pluginId, sessionId);
+    if (!session || !session.keyboardFinish)
+      return err('invalid_state', 'No keyboard-interactive prompt is pending');
+    const finish = session.keyboardFinish;
+    session.keyboardFinish = null;
+    try {
+      finish(answers);
+      return ok(true);
+    } catch (e: unknown) {
+      return err('io_error', sshErrorMessage(e, 'Unable to submit keyboard-interactive response'));
+    }
+  });
+
+  ipcMain.handle('plugin:sshSftpRealpath', async (_event, pluginId: string, params: unknown) => {
+    const rec = assertInstalledPlugin(pluginId);
+    if (!rec) return err('not_installed', 'Plugin not installed');
+    if (!hasPermission(rec.manifest, 'net:ssh'))
+      return err('permission_denied', 'Missing permission: net:ssh');
+    const p = isRecord(params) ? params : {};
+    const sessionId = asString(p.sessionId).trim();
+    const remotePath = asString(p.path, '.').trim() || '.';
+    const session = getSshSession(pluginId, sessionId);
+    if (!session || session.status !== 'ready') return err('invalid_state', 'SSH session is not ready');
+    try {
+      const sftp = await ensureSftp(session);
+      const resolved = await new Promise<string>((resolve, reject) => {
+        sftp.realpath(remotePath, (error, result) => {
+          if (error) reject(error);
+          else resolve(result);
+        });
+      });
+      return ok(resolved);
+    } catch (e: unknown) {
+      return err('io_error', sshErrorMessage(e, 'Unable to resolve remote path'));
+    }
+  });
+
+  ipcMain.handle('plugin:sshSftpList', async (_event, pluginId: string, params: unknown) => {
+    const rec = assertInstalledPlugin(pluginId);
+    if (!rec) return err('not_installed', 'Plugin not installed');
+    if (!hasPermission(rec.manifest, 'net:ssh'))
+      return err('permission_denied', 'Missing permission: net:ssh');
+    const p = isRecord(params) ? params : {};
+    const sessionId = asString(p.sessionId).trim();
+    const remotePath = asString(p.path, '.').trim() || '.';
+    const session = getSshSession(pluginId, sessionId);
+    if (!session || session.status !== 'ready') return err('invalid_state', 'SSH session is not ready');
+    try {
+      const sftp = await ensureSftp(session);
+      const list = await new Promise<
+        Array<{
+          filename: string;
+          longname: string;
+          attrs: {
+            size: number;
+            mtime: number;
+            mode: number;
+            isDirectory?: () => boolean;
+            isSymbolicLink?: () => boolean;
+          };
+        }>
+      >((resolve, reject) => {
+        sftp.readdir(remotePath, (error, result) => {
+          if (error) reject(error);
+          else resolve(result);
+        });
+      });
+      return ok(
+        list
+          .filter((entry) => entry.filename !== '.' && entry.filename !== '..')
+          .map((entry) => ({
+            name: entry.filename,
+            type: pathTypeFromSftpEntry(entry),
+            size: Number(entry.attrs.size ?? 0),
+            mtime: Number(entry.attrs.mtime ?? 0),
+            mode: Number(entry.attrs.mode ?? 0),
+          })),
+      );
+    } catch (e: unknown) {
+      return err('io_error', sshErrorMessage(e, 'Unable to list remote directory'));
+    }
+  });
+
+  ipcMain.handle('plugin:sshSftpReadFile', async (_event, pluginId: string, params: unknown) => {
+    const rec = assertInstalledPlugin(pluginId);
+    if (!rec) return err('not_installed', 'Plugin not installed');
+    if (!hasPermission(rec.manifest, 'net:ssh'))
+      return err('permission_denied', 'Missing permission: net:ssh');
+    const p = isRecord(params) ? params : {};
+    const sessionId = asString(p.sessionId).trim();
+    const remotePath = asString(p.path).trim();
+    if (!remotePath) return err('invalid_params', 'Remote path is required');
+    const session = getSshSession(pluginId, sessionId);
+    if (!session || session.status !== 'ready') return err('invalid_state', 'SSH session is not ready');
+    try {
+      const sftp = await ensureSftp(session);
+      const data = await new Promise<Buffer>((resolve, reject) => {
+        sftp.readFile(remotePath, (error, buffer) => {
+          if (error) reject(error);
+          else resolve(buffer);
+        });
+      });
+      if (data.byteLength > 50 * 1024 * 1024)
+        return err('too_large', 'Files larger than 50 MB cannot be downloaded in the plugin');
+      return ok({ name: path.posix.basename(remotePath), base64: data.toString('base64') });
+    } catch (e: unknown) {
+      return err('io_error', sshErrorMessage(e, 'Unable to read remote file'));
+    }
+  });
+
+  ipcMain.handle('plugin:sshSftpWriteFile', async (_event, pluginId: string, params: unknown) => {
+    const rec = assertInstalledPlugin(pluginId);
+    if (!rec) return err('not_installed', 'Plugin not installed');
+    if (!hasPermission(rec.manifest, 'net:ssh'))
+      return err('permission_denied', 'Missing permission: net:ssh');
+    const p = isRecord(params) ? params : {};
+    const sessionId = asString(p.sessionId).trim();
+    const remotePath = asString(p.path).trim();
+    const base64 = asString(p.base64).trim();
+    if (!remotePath || !base64) return err('invalid_params', 'Remote path and file data are required');
+    const data = Buffer.from(base64, 'base64');
+    if (data.byteLength > 50 * 1024 * 1024)
+      return err('too_large', 'Files larger than 50 MB cannot be uploaded in the plugin');
+    const session = getSshSession(pluginId, sessionId);
+    if (!session || session.status !== 'ready') return err('invalid_state', 'SSH session is not ready');
+    try {
+      const sftp = await ensureSftp(session);
+      await new Promise<void>((resolve, reject) => {
+        sftp.writeFile(remotePath, data, (error) => {
+          if (error) reject(error);
+          else resolve();
+        });
+      });
+      sendSshEvent(pluginId, { type: 'sftp', sessionId, action: 'write', path: remotePath });
+      return ok(true);
+    } catch (e: unknown) {
+      return err('io_error', sshErrorMessage(e, 'Unable to write remote file'));
+    }
+  });
+
+  ipcMain.handle('plugin:sshSftpMkdir', async (_event, pluginId: string, params: unknown) => {
+    const rec = assertInstalledPlugin(pluginId);
+    if (!rec) return err('not_installed', 'Plugin not installed');
+    if (!hasPermission(rec.manifest, 'net:ssh'))
+      return err('permission_denied', 'Missing permission: net:ssh');
+    const p = isRecord(params) ? params : {};
+    const sessionId = asString(p.sessionId).trim();
+    const remotePath = asString(p.path).trim();
+    if (!remotePath) return err('invalid_params', 'Remote path is required');
+    const session = getSshSession(pluginId, sessionId);
+    if (!session || session.status !== 'ready') return err('invalid_state', 'SSH session is not ready');
+    try {
+      const sftp = await ensureSftp(session);
+      await new Promise<void>((resolve, reject) => {
+        sftp.mkdir(remotePath, (error) => {
+          if (error) reject(error);
+          else resolve();
+        });
+      });
+      sendSshEvent(pluginId, { type: 'sftp', sessionId, action: 'mkdir', path: remotePath });
+      return ok(true);
+    } catch (e: unknown) {
+      return err('io_error', sshErrorMessage(e, 'Unable to create remote directory'));
+    }
+  });
+
+  ipcMain.handle('plugin:sshSftpDelete', async (_event, pluginId: string, params: unknown) => {
+    const rec = assertInstalledPlugin(pluginId);
+    if (!rec) return err('not_installed', 'Plugin not installed');
+    if (!hasPermission(rec.manifest, 'net:ssh'))
+      return err('permission_denied', 'Missing permission: net:ssh');
+    const p = isRecord(params) ? params : {};
+    const sessionId = asString(p.sessionId).trim();
+    const remotePath = asString(p.path).trim();
+    const itemType = asString(p.type, 'file') === 'directory' ? 'directory' : 'file';
+    if (!remotePath) return err('invalid_params', 'Remote path is required');
+    const session = getSshSession(pluginId, sessionId);
+    if (!session || session.status !== 'ready') return err('invalid_state', 'SSH session is not ready');
+    try {
+      const sftp = await ensureSftp(session);
+      await new Promise<void>((resolve, reject) => {
+        const done = (error?: Error | null) => (error ? reject(error) : resolve());
+        if (itemType === 'directory') sftp.rmdir(remotePath, done);
+        else sftp.unlink(remotePath, done);
+      });
+      sendSshEvent(pluginId, { type: 'sftp', sessionId, action: 'delete', path: remotePath });
+      return ok(true);
+    } catch (e: unknown) {
+      return err('io_error', sshErrorMessage(e, 'Unable to delete remote item'));
+    }
+  });
+
+  ipcMain.handle('plugin:sshSftpRename', async (_event, pluginId: string, params: unknown) => {
+    const rec = assertInstalledPlugin(pluginId);
+    if (!rec) return err('not_installed', 'Plugin not installed');
+    if (!hasPermission(rec.manifest, 'net:ssh'))
+      return err('permission_denied', 'Missing permission: net:ssh');
+    const p = isRecord(params) ? params : {};
+    const sessionId = asString(p.sessionId).trim();
+    const sourcePath = asString(p.sourcePath).trim();
+    const destinationPath = asString(p.destinationPath).trim();
+    if (!sourcePath || !destinationPath)
+      return err('invalid_params', 'Source and destination paths are required');
+    const session = getSshSession(pluginId, sessionId);
+    if (!session || session.status !== 'ready') return err('invalid_state', 'SSH session is not ready');
+    try {
+      const sftp = await ensureSftp(session);
+      await new Promise<void>((resolve, reject) => {
+        sftp.rename(sourcePath, destinationPath, (error) => {
+          if (error) reject(error);
+          else resolve();
+        });
+      });
+      sendSshEvent(pluginId, { type: 'sftp', sessionId, action: 'rename', path: destinationPath });
+      return ok(true);
+    } catch (e: unknown) {
+      return err('io_error', sshErrorMessage(e, 'Unable to rename remote item'));
+    }
+  });
+
   ipcMain.handle('plugin:httpRequest', async (_event, pluginId: string, params: unknown) => {
     const rec = assertInstalledPlugin(pluginId);
     if (!rec) return err('not_installed', 'Plugin not installed');
-    if (!hasPermission(rec.manifest, 'http:proxy')) return err('permission_denied', 'Missing permission: http:proxy');
+    if (!hasPermission(rec.manifest, 'http:proxy'))
+      return err('permission_denied', 'Missing permission: http:proxy');
     const p = isRecord(params) ? params : {};
     const url = typeof p.url === 'string' ? p.url : '';
     const method = typeof p.method === 'string' ? p.method.toUpperCase() : 'GET';
@@ -1366,7 +2756,8 @@ export function register(): void {
   ipcMain.handle('plugin:storageGet', (_event, pluginId: string, key: string) => {
     const rec = assertInstalledPlugin(pluginId);
     if (!rec) return err('not_installed', 'Plugin not installed');
-    if (!hasPermission(rec.manifest, 'storage:kv')) return err('permission_denied', 'Missing permission: storage:kv');
+    if (!hasPermission(rec.manifest, 'storage:kv'))
+      return err('permission_denied', 'Missing permission: storage:kv');
     try {
       migrateLegacyPluginStore(pluginId);
       const kv = readPluginKv();
@@ -1380,7 +2771,8 @@ export function register(): void {
   ipcMain.handle('plugin:storageSet', (_event, pluginId: string, key: string, value: unknown) => {
     const rec = assertInstalledPlugin(pluginId);
     if (!rec) return err('not_installed', 'Plugin not installed');
-    if (!hasPermission(rec.manifest, 'storage:kv')) return err('permission_denied', 'Missing permission: storage:kv');
+    if (!hasPermission(rec.manifest, 'storage:kv'))
+      return err('permission_denied', 'Missing permission: storage:kv');
     try {
       migrateLegacyPluginStore(pluginId);
       const kv = readPluginKv();
@@ -1397,7 +2789,8 @@ export function register(): void {
   ipcMain.handle('plugin:storageDelete', (_event, pluginId: string, key: string) => {
     const rec = assertInstalledPlugin(pluginId);
     if (!rec) return err('not_installed', 'Plugin not installed');
-    if (!hasPermission(rec.manifest, 'storage:kv')) return err('permission_denied', 'Missing permission: storage:kv');
+    if (!hasPermission(rec.manifest, 'storage:kv'))
+      return err('permission_denied', 'Missing permission: storage:kv');
     try {
       migrateLegacyPluginStore(pluginId);
       const kv = readPluginKv();
@@ -1414,7 +2807,8 @@ export function register(): void {
   ipcMain.handle('plugin:storageList', (_event, pluginId: string, prefix?: string) => {
     const rec = assertInstalledPlugin(pluginId);
     if (!rec) return err('not_installed', 'Plugin not installed');
-    if (!hasPermission(rec.manifest, 'storage:kv')) return err('permission_denied', 'Missing permission: storage:kv');
+    if (!hasPermission(rec.manifest, 'storage:kv'))
+      return err('permission_denied', 'Missing permission: storage:kv');
     try {
       migrateLegacyPluginStore(pluginId);
       const kv = readPluginKv();
@@ -1430,7 +2824,8 @@ export function register(): void {
   ipcMain.handle('plugin:storageClear', (_event, pluginId: string) => {
     const rec = assertInstalledPlugin(pluginId);
     if (!rec) return err('not_installed', 'Plugin not installed');
-    if (!hasPermission(rec.manifest, 'storage:kv')) return err('permission_denied', 'Missing permission: storage:kv');
+    if (!hasPermission(rec.manifest, 'storage:kv'))
+      return err('permission_denied', 'Missing permission: storage:kv');
     try {
       migrateLegacyPluginStore(pluginId);
       const kv = readPluginKv();
@@ -1445,10 +2840,12 @@ export function register(): void {
   ipcMain.handle('plugin:fsOpenFileDialog', async (event, pluginId: string, params: unknown) => {
     const rec = assertInstalledPlugin(pluginId);
     if (!rec) return err('not_installed', 'Plugin not installed');
-    if (!hasPermission(rec.manifest, 'fs:dialog')) return err('permission_denied', 'Missing permission: fs:dialog');
+    if (!hasPermission(rec.manifest, 'fs:dialog'))
+      return err('permission_denied', 'Missing permission: fs:dialog');
     const p = isRecord(params) ? params : {};
     const filters =
-      Array.isArray(p.filters) && p.filters.every((f) => isRecord(f) && typeof f.name === 'string' && Array.isArray(f.extensions))
+      Array.isArray(p.filters) &&
+      p.filters.every((f) => isRecord(f) && typeof f.name === 'string' && Array.isArray(f.extensions))
         ? (p.filters as FileFilter[])
         : undefined;
     const multiple = Boolean(p.multiple);
@@ -1471,11 +2868,13 @@ export function register(): void {
   ipcMain.handle('plugin:fsSaveFileDialog', async (event, pluginId: string, params: unknown) => {
     const rec = assertInstalledPlugin(pluginId);
     if (!rec) return err('not_installed', 'Plugin not installed');
-    if (!hasPermission(rec.manifest, 'fs:dialog')) return err('permission_denied', 'Missing permission: fs:dialog');
+    if (!hasPermission(rec.manifest, 'fs:dialog'))
+      return err('permission_denied', 'Missing permission: fs:dialog');
     const p = isRecord(params) ? params : {};
     const suggestedName = typeof p.suggestedName === 'string' ? p.suggestedName : 'output.txt';
     const filters =
-      Array.isArray(p.filters) && p.filters.every((f) => isRecord(f) && typeof f.name === 'string' && Array.isArray(f.extensions))
+      Array.isArray(p.filters) &&
+      p.filters.every((f) => isRecord(f) && typeof f.name === 'string' && Array.isArray(f.extensions))
         ? (p.filters as FileFilter[])
         : undefined;
     const win = BrowserWindow.fromWebContents(event.sender);
@@ -1494,7 +2893,8 @@ export function register(): void {
   ipcMain.handle('plugin:fsReadFile', (_event, pluginId: string, fileToken: string, encoding?: string) => {
     const rec = assertInstalledPlugin(pluginId);
     if (!rec) return err('not_installed', 'Plugin not installed');
-    if (!hasPermission(rec.manifest, 'fs:read')) return err('permission_denied', 'Missing permission: fs:read');
+    if (!hasPermission(rec.manifest, 'fs:read'))
+      return err('permission_denied', 'Missing permission: fs:read');
     const fp = getToken(fileTokenMap, pluginId, fileToken);
     if (!fp) return err('invalid_params', 'Invalid fileToken');
     try {
@@ -1506,20 +2906,24 @@ export function register(): void {
     }
   });
 
-  ipcMain.handle('plugin:fsWriteFile', (_event, pluginId: string, fileToken: string, content: string, encoding?: string) => {
-    const rec = assertInstalledPlugin(pluginId);
-    if (!rec) return err('not_installed', 'Plugin not installed');
-    if (!hasPermission(rec.manifest, 'fs:write')) return err('permission_denied', 'Missing permission: fs:write');
-    const fp = getToken(fileTokenMap, pluginId, fileToken);
-    if (!fp) return err('invalid_params', 'Invalid fileToken');
-    try {
-      const enc = typeof encoding === 'string' ? encoding : 'utf-8';
-      fs.writeFileSync(fp, content, enc as BufferEncoding);
-      return ok(true);
-    } catch (e: unknown) {
-      return err('io_error', e instanceof Error ? e.message : String(e));
-    }
-  });
+  ipcMain.handle(
+    'plugin:fsWriteFile',
+    (_event, pluginId: string, fileToken: string, content: string, encoding?: string) => {
+      const rec = assertInstalledPlugin(pluginId);
+      if (!rec) return err('not_installed', 'Plugin not installed');
+      if (!hasPermission(rec.manifest, 'fs:write'))
+        return err('permission_denied', 'Missing permission: fs:write');
+      const fp = getToken(fileTokenMap, pluginId, fileToken);
+      if (!fp) return err('invalid_params', 'Invalid fileToken');
+      try {
+        const enc = typeof encoding === 'string' ? encoding : 'utf-8';
+        fs.writeFileSync(fp, content, enc as BufferEncoding);
+        return ok(true);
+      } catch (e: unknown) {
+        return err('io_error', e instanceof Error ? e.message : String(e));
+      }
+    },
+  );
 
   ipcMain.handle('plugin:systemOpenExternal', async (_event, pluginId: string, url: string) => {
     const rec = assertInstalledPlugin(pluginId);
@@ -1528,7 +2932,8 @@ export function register(): void {
       return err('permission_denied', 'Missing permission: system:openExternal');
     try {
       const parsed = new URL(url);
-      if (!['http:', 'https:', 'mailto:'].includes(parsed.protocol)) return err('invalid_params', 'Unsupported URL');
+      if (!['http:', 'https:', 'mailto:'].includes(parsed.protocol))
+        return err('invalid_params', 'Unsupported URL');
       await shell.openExternal(parsed.toString());
       return ok(true);
     } catch (e: unknown) {

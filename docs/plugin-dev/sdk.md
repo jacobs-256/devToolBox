@@ -33,6 +33,7 @@ Recommended permission keys:
   - `http:proxy` (plugin may call `sdk.http.request`)
 - Network
   - `net:socket` (plugin may use the host socket API for TCP/UDP testing)
+  - `net:ssh` (plugin may use host-managed SSH sessions and SFTP)
 - File system
   - `fs:dialog` (plugin may open file dialogs)
   - `fs:read` / `fs:write` (plugin may read/write via tokens)
@@ -157,6 +158,62 @@ Notes:
 
 - `payload` decoding is performed by the host based on `encoding`
 - `hex` payloads must have an even length (whitespace may be ignored by the host)
+
+### sdk.ssh (Host-implemented)
+
+Marketplace plugins that provide remote development workflows should use the host SSH capability instead of opening raw network connections.
+
+Permission:
+
+- Requires `net:ssh`
+
+Authentication methods:
+
+- `password`
+- `privateKey` (OpenSSH private key with optional passphrase)
+- `agent` (explicit agent socket or `SSH_AUTH_SOCK`)
+- `keyboard-interactive` (the host emits prompts for MFA/OTP flows)
+
+Methods:
+
+- `sdk.ssh.connect({ sessionId, terminalId, profileId?, hold?, holdKey?, host, port, username, authMethod, password?, privateKey?, passphrase?, agent?, hostFingerprint?, cols?, rows?, proxy? })`
+- `sdk.ssh.disconnect(sessionId)`
+- `sdk.ssh.closeTerminal(sessionId, terminalId)` (closes one interactive shell while keeping the Hold transport)
+- `sdk.ssh.listSessions()`
+- `sdk.ssh.write(sessionId, terminalId, data)`
+- `sdk.ssh.resize(sessionId, terminalId, cols, rows)`
+- `sdk.ssh.respondKeyboard(sessionId, answers)`
+- `sdk.ssh.sftpRealpath(sessionId, path?)`
+- `sdk.ssh.sftpList(sessionId, path)`
+- `sdk.ssh.sftpReadFile(sessionId, path)`
+- `sdk.ssh.sftpWriteFile(sessionId, path, base64)`
+- `sdk.ssh.sftpMkdir(sessionId, path)`
+- `sdk.ssh.sftpDelete(sessionId, path, type)`
+- `sdk.ssh.sftpRename(sessionId, sourcePath, destinationPath)`
+
+Events:
+
+The host pushes shell output, session status, host-key warnings, and keyboard-interactive prompts through:
+
+```ts
+{ type: 'devtoolbox:sdk:event', domain: 'ssh', payload: SshEvent }
+```
+
+SSH Hold:
+
+- Set `hold: true` and provide a stable `holdKey` (normally the saved connection/profile ID).
+- The host keeps the SSH client alive after the plugin detaches its terminal tab and retains a bounded terminal output buffer.
+- Reconnecting with the same saved profile reuses the existing held session instead of authenticating again.
+- Each `terminalId` is an independent interactive shell on the same held SSH client, so split panes and copied tabs do not perform another SSH authentication.
+- SFTP operations continue to use the shared SSH client represented by `sessionId`.
+- A plugin should expose separate “detach” and “disconnect/stop hold” actions; detaching must not call `sdk.ssh.disconnect()`.
+
+SSH Proxy / jump host:
+
+- Pass `proxy` to route the target SSH handshake through an existing or automatically created held SSH client.
+- `proxy` uses the same auth fields as `connect`, plus optional `sessionId`, `profileId`, `name`, and `holdKey`.
+- The host opens `forwardOut` on the proxy client and connects the target SSH client over that stream; terminal panes and SFTP still operate on the target `sessionId`.
+- Proxy sessions are held for reuse. A visible connection to the same proxy profile can attach a shell to the held proxy transport without re-authenticating.
 
 ### sdk.bluetooth (Experimental)
 

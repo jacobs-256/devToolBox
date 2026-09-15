@@ -16,6 +16,7 @@ import {
   VscRegex,
   VscShield,
   VscSymbolString,
+  VscTerminal,
 } from 'react-icons/vsc';
 import { TbBrandJavascript, TbKey, TbLanguageHiragana, TbLetterU, TbQrcode, TbShieldLock, TbWifi } from 'react-icons/tb';
 
@@ -36,6 +37,7 @@ const vsc = {
   VscRegex,
   VscShield,
   VscSymbolString,
+  VscTerminal,
 } as const;
 
 const tb = {

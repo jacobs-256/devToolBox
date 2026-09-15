@@ -13,7 +13,12 @@ type RequestMessage = {
 
 type ResponseMessage =
   | { type: 'devtoolbox:sdk:response'; requestId: string; ok: true; data?: unknown }
-  | { type: 'devtoolbox:sdk:response'; requestId: string; ok: false; error: { code: string; message: string; details?: unknown } };
+  | {
+      type: 'devtoolbox:sdk:response';
+      requestId: string;
+      ok: false;
+      error: { code: string; message: string; details?: unknown };
+    };
 
 type SdkError = { code: string; message: string; details?: unknown };
 type SdkResult = { ok: boolean; data?: unknown; error?: SdkError };
@@ -38,7 +43,13 @@ function logToMain(pluginId: string, level: string, message: string, data?: unkn
 }
 
 async function callSdk(pluginId: string, method: string, params: unknown): Promise<SdkResult> {
-  if (method === 'log.debug' || method === 'log.info' || method === 'log.warn' || method === 'log.error' || method === 'log.log') {
+  if (
+    method === 'log.debug' ||
+    method === 'log.info' ||
+    method === 'log.warn' ||
+    method === 'log.error' ||
+    method === 'log.log'
+  ) {
     const p = isRecord(params) ? params : {};
     const message = typeof p.message === 'string' ? p.message : typeof params === 'string' ? params : '';
     const data = p.data;
@@ -74,7 +85,11 @@ async function callSdk(pluginId: string, method: string, params: unknown): Promi
   if (method === 'fs.saveFileDialog') return api.pluginFsSaveFileDialog(pluginId, params);
   if (method === 'fs.readFile') {
     const p = isRecord(params) ? params : {};
-    return api.pluginFsReadFile(pluginId, String(p.fileToken ?? ''), typeof p.encoding === 'string' ? p.encoding : undefined);
+    return api.pluginFsReadFile(
+      pluginId,
+      String(p.fileToken ?? ''),
+      typeof p.encoding === 'string' ? p.encoding : undefined,
+    );
   }
   if (method === 'fs.writeFile') {
     const p = isRecord(params) ? params : {};
@@ -115,6 +130,21 @@ async function callSdk(pluginId: string, method: string, params: unknown): Promi
   if (method === 'socket.clientDisconnect') return api.pluginSocketClientDisconnect(pluginId);
   if (method === 'socket.clientStatus') return api.pluginSocketClientStatus(pluginId);
   if (method === 'socket.clientSend') return api.pluginSocketClientSend(pluginId, params);
+
+  if (method === 'ssh.connect') return api.pluginSshConnect(pluginId, params);
+  if (method === 'ssh.disconnect') return api.pluginSshDisconnect(pluginId, params);
+  if (method === 'ssh.closeTerminal') return api.pluginSshCloseTerminal(pluginId, params);
+  if (method === 'ssh.listSessions') return api.pluginSshListSessions(pluginId);
+  if (method === 'ssh.write') return api.pluginSshWrite(pluginId, params);
+  if (method === 'ssh.resize') return api.pluginSshResize(pluginId, params);
+  if (method === 'ssh.respondKeyboard') return api.pluginSshRespondKeyboard(pluginId, params);
+  if (method === 'ssh.sftpRealpath') return api.pluginSshSftpRealpath(pluginId, params);
+  if (method === 'ssh.sftpList') return api.pluginSshSftpList(pluginId, params);
+  if (method === 'ssh.sftpReadFile') return api.pluginSshSftpReadFile(pluginId, params);
+  if (method === 'ssh.sftpWriteFile') return api.pluginSshSftpWriteFile(pluginId, params);
+  if (method === 'ssh.sftpMkdir') return api.pluginSshSftpMkdir(pluginId, params);
+  if (method === 'ssh.sftpDelete') return api.pluginSshSftpDelete(pluginId, params);
+  if (method === 'ssh.sftpRename') return api.pluginSshSftpRename(pluginId, params);
 
   return { ok: false, error: { code: 'not_supported', message: `Unknown method: ${method}` } };
 }
@@ -213,6 +243,17 @@ export default function PluginHost({ pluginId, entryUrl }: PluginHostProps) {
     return () => api.offPluginSocketEvent(handler);
   }, [pluginId]);
 
+  useEffect(() => {
+    const api = window.electronAPI;
+    if (!api?.onPluginSshEvent || !api?.offPluginSshEvent) return;
+    const handler = api.onPluginSshEvent((pid: string, ev: unknown) => {
+      if (pid !== pluginId) return;
+      const iframeWin = iframeRef.current?.contentWindow;
+      if (!iframeWin) return;
+      iframeWin.postMessage({ type: 'devtoolbox:sdk:event', domain: 'ssh', payload: ev }, '*');
+    });
+    return () => api.offPluginSshEvent(handler);
+  }, [pluginId]);
   if (!src) return <div className={styles.empty}>Plugin not available.</div>;
 
   return (
